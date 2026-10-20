@@ -46,7 +46,7 @@ duplication API at its true position.
   happens via the compositor's desktop duplication, not in the driver).
 - Modeled on Microsoft's IddSampleDriver (MIT).
 
-### 2. compositor/ — dscomp.exe (C++17, D3D11 + DXGI 1.5)
+### 2. compositor/ — dscomp.exe (C++20, D3D11 + DXGI 1.5)
 - Reads `%ProgramData%\DesktopSplitter\config.json` (written by control app).
 - For each segment: finds the virtual monitor's DXGI output by device name
   (`\\.\DISPLAYn`), starts an `IDXGIOutputDuplication` capture thread.
@@ -64,7 +64,7 @@ duplication API at its true position.
   non-rectangular unions).
 - Exits cleanly on `WM_CLOSE` / named event `Global\DeskSplitCompositorStop`.
 
-### 3. app/ — DesktopSplitter.exe (C# .NET 8 WPF)
+### 3. app/ — DesktopSplitter.exe (C# .NET 10 WPF + WPF UI)
 - Enumerates physical monitors (`QueryDisplayConfig`) with max refresh rate.
 - UI: choose physical monitor → choose layout → set each segment's resolution
   (defaults = physical resolution subdivided) → Apply / Revert.

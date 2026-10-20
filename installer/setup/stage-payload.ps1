@@ -126,7 +126,7 @@ if ($SkipAppPublish) {
     }
 
     # `-o $publishDir` pins the output, so the app's target framework can change
-    # (net8.0-windows -> net8.0-windows10.0.19041.0 for WinRT) without touching
+    # (for example, net10.0-windows) without touching
     # this script. The recursive fallback covers an SDK that ever decides to
     # nest the output under a TFM/RID folder anyway.
     $built = Join-Path $publishDir 'DesktopSplitter.exe'
@@ -145,7 +145,9 @@ $products = @(
     @{ Source = Join-Path $repoRoot "compositor\build\x64\$Configuration\dscomp.exe";           Target = 'dscomp.exe';           Required = $true },
     @{ Source = Join-Path $repoRoot "installer\devcreate\bin\x64\$Configuration\devcreate.exe"; Target = 'devcreate.exe';        Required = $true },
     @{ Source = Join-Path $repoRoot "installer\edid-override\build\x64\$Configuration\edidoverride.exe"; Target = 'edidoverride.exe'; Required = $true },
-    @{ Source = Join-Path $repoRoot 'compositor\README.md';                                     Target = 'compositor-README.md'; Required = $false }
+    @{ Source = Join-Path $repoRoot 'compositor\README.md';                                     Target = 'compositor-README.md'; Required = $false },
+    @{ Source = Join-Path $repoRoot 'app\Assets\Fonts\LICENSE.txt'; Target = 'NanumSquareRound-LICENSE.txt'; Required = $true },
+    @{ Source = Join-Path $repoRoot 'app\Assets\Fonts\NOTICE.txt'; Target = 'NanumSquareRound-NOTICE.txt'; Required = $true }
 )
 
 foreach ($item in $products) {
@@ -166,7 +168,7 @@ foreach ($item in $products) {
 $staged = @()
 foreach ($name in @('DesktopSplitterVdd.inf', 'DesktopSplitterVdd.dll', 'DesktopSplitterVdd.cat',
                     'DesktopSplitter.exe', 'dscomp.exe', 'devcreate.exe', 'edidoverride.exe',
-                    'compositor-README.md')) {
+                    'compositor-README.md', 'NanumSquareRound-LICENSE.txt', 'NanumSquareRound-NOTICE.txt')) {
     $p = Join-Path $OutDir $name
     if (-not (Test-Path $p)) { Fail "expected staged file missing: $p" }
     $len = (Get-Item $p).Length

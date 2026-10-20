@@ -1,21 +1,41 @@
 <Window x:Class="DesktopSplitter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         Title="DesktopSplitter"
-        Height="900" Width="960"
-        MinHeight="680" MinWidth="820"
-        Background="{StaticResource WindowBackground}"
+        Height="880" Width="1180"
+        MinHeight="680" MinWidth="960" Language="ko-KR" FontFamily="{DynamicResource AppFontFamily}" FontSize="14"
+        Icon="{StaticResource AppIcon}" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+        Background="{DynamicResource ApplicationBackgroundBrush}"
         WindowStartupLocation="CenterScreen">
 
     <Window.Resources>
+        <DataTemplate x:Key="ShortcutRowTemplate">
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <CheckBox Content="{Binding Label, Mode=OneWay}" IsChecked="{Binding Enabled}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1" Text="{Binding Gesture, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding Enabled}" MaxLength="64"
+                         PreviewKeyDown="Shortcut_PreviewKeyDown" GotKeyboardFocus="Shortcut_GotKeyboardFocus" LostKeyboardFocus="Shortcut_LostKeyboardFocus"
+                         AutomationProperties.Name="{Binding Label}" ToolTip="Ctrl+Alt+Shift+F1처럼 입력하세요."/>
+                <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Text="{Binding RegistrationIssue, Mode=OneWay}" TextWrapping="Wrap" FontSize="11"
+                           Foreground="{DynamicResource SystemFillColorCautionBrush}" Margin="0,3,0,0">
+                    <TextBlock.Style><Style TargetType="TextBlock">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers><DataTrigger Binding="{Binding HasRegistrationIssue}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                    </Style></TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </DataTemplate>
 
         <!-- Layout thumbnail: rectangles positioned on a canvas -->
         <DataTemplate x:Key="LayoutItemTemplate">
             <StackPanel Width="148" Margin="4,6">
-                <Border Background="{StaticResource PreviewBackground}"
-                        BorderBrush="{StaticResource PanelBorder}"
+                <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}"
+                        BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
                         BorderThickness="1" CornerRadius="3"
-                        Width="140" Height="84">
+                        Width="140" Height="64">
+                    <Viewbox Stretch="Uniform" Margin="4">
                     <ItemsControl ItemsSource="{Binding PreviewBoxes}" Width="132" Height="76">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
@@ -32,16 +52,17 @@
                             <DataTemplate>
                                 <Rectangle Width="{Binding W}" Height="{Binding H}"
                                            RadiusX="2" RadiusY="2"
-                                           Fill="{StaticResource SegmentFill}"
+                                           Fill="{DynamicResource AccentButtonBackground}"
                                            Opacity="0.85"/>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    </Viewbox>
                 </Border>
                 <TextBlock Text="{Binding Name}" TextAlignment="Center" Margin="0,6,0,0"
                            TextWrapping="Wrap" FontSize="12"/>
                 <TextBlock Text="{Binding Description}" TextAlignment="Center"
-                           Foreground="{StaticResource MutedBrush}" FontSize="10.5"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10.5"
                            TextWrapping="Wrap" Margin="0,2,0,0"/>
             </StackPanel>
         </DataTemplate>
@@ -57,11 +78,14 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#FF232833"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentButtonBackground}"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
-                                <Setter TargetName="Bd" Property="Background" Value="#FF202836"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentButtonBackground}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -78,19 +102,25 @@
         <!-- A numbered zone -->
         <DataTemplate x:Key="ZoneTemplate">
             <Border Width="{Binding W}" Height="{Binding H}" ClipToBounds="True"
-                    Background="{StaticResource ZoneFill}"
-                    BorderBrush="{StaticResource ZoneStroke}" BorderThickness="1"
+                    Background="{DynamicResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{DynamicResource AccentButtonBackground}" BorderThickness="1"
                     CornerRadius="3">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                     <TextBlock Text="{Binding Number}" FontSize="30" FontWeight="Bold"
-                               TextAlignment="Center" Foreground="{StaticResource ZoneNumberBrush}"/>
+                               TextAlignment="Center" Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    <TextBlock Text="선택 칸" FontSize="12" TextAlignment="Center" Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers><DataTrigger Binding="{Binding IsPrimary}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                        </Style></TextBlock.Style>
+                    </TextBlock>
                     <TextBlock Text="{Binding SizeText}" FontSize="12" TextAlignment="Center"
-                               Foreground="{StaticResource ForegroundBrush}" Margin="0,1,0,0"/>
-                    <Border Background="{StaticResource AccentSoftBrush}" BorderBrush="{StaticResource ZoneStroke}"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="0,1,0,0"/>
+                    <Border Background="{DynamicResource SubtleFillColorSecondaryBrush}" BorderBrush="{DynamicResource AccentButtonBackground}"
                             BorderThickness="1" CornerRadius="8" Padding="7,1" Margin="0,4,0,0"
                             HorizontalAlignment="Center">
                         <TextBlock Text="{Binding AspectNote}" FontSize="10.5" FontWeight="SemiBold"
-                                   Foreground="{StaticResource ForegroundBrush}"/>
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
                         <Border.Style>
                             <Style TargetType="Border">
                                 <Setter Property="Visibility" Value="Collapsed"/>
@@ -108,7 +138,7 @@
 
         <!-- A draggable border between adjacent zones -->
         <Style x:Key="SplitterThumbStyle" TargetType="Border">
-            <Setter Property="Background" Value="{StaticResource SplitterBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
             <Setter Property="CornerRadius" Value="3"/>
             <Setter Property="Opacity" Value="0.75"/>
             <EventSetter Event="MouseLeftButtonDown" Handler="Splitter_MouseLeftButtonDown"/>
@@ -117,11 +147,11 @@
             <EventSetter Event="LostMouseCapture" Handler="Splitter_LostMouseCapture"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="{StaticResource SplitterHoverBrush}"/>
+                    <Setter Property="Background" Value="{DynamicResource AccentButtonBackground}"/>
                     <Setter Property="Opacity" Value="1"/>
                 </Trigger>
                 <Trigger Property="IsMouseCaptureWithin" Value="True">
-                    <Setter Property="Background" Value="{StaticResource SplitterHoverBrush}"/>
+                    <Setter Property="Background" Value="{DynamicResource AccentButtonBackground}"/>
                     <Setter Property="Opacity" Value="1"/>
                 </Trigger>
             </Style.Triggers>
@@ -136,20 +166,20 @@
 
         <!-- Compact per-zone manual entry -->
         <DataTemplate x:Key="SegmentItemTemplate">
-            <Border Background="{StaticResource PanelBackground}"
-                    BorderBrush="{StaticResource PanelBorder}" BorderThickness="1"
-                    CornerRadius="4" Padding="10,7" Margin="0,0,8,8" Width="212">
+            <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
+                    CornerRadius="4" Padding="10,7" Margin="0,0,8,8" Width="244">
                 <StackPanel>
                     <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Margin="0,0,0,5"/>
                     <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="W" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
-                        <TextBox Width="66" Margin="6,0,10,0"
+                        <TextBlock Text="가로" VerticalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        <TextBox Width="68" Margin="6,0,10,0"
                                  Text="{Binding WidthText, UpdateSourceTrigger=PropertyChanged}"/>
-                        <TextBlock Text="H" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
-                        <TextBox Width="66" Margin="6,0,0,0"
+                        <TextBlock Text="세로" VerticalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        <TextBox Width="68" Margin="6,0,0,0"
                                  Text="{Binding HeightText, UpdateSourceTrigger=PropertyChanged}"/>
                     </StackPanel>
-                    <TextBlock Text="{Binding Error}" Foreground="{StaticResource ErrorBrush}"
+                    <TextBlock Text="{Binding Error}" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
                                FontSize="10.5" Margin="0,5,0,0" TextWrapping="Wrap">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
@@ -168,255 +198,192 @@
 
     </Window.Resources>
 
-    <Grid Margin="16">
+    <Grid Margin="22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="170"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-
-        <!-- Header -->
-        <StackPanel Grid.Row="0" Margin="0,0,0,12">
-            <StackPanel Orientation="Horizontal">
-                <TextBlock Text="DesktopSplitter" FontSize="19" FontWeight="SemiBold"/>
-                <TextBlock x:Name="VersionLabel" VerticalAlignment="Bottom" Margin="8,0,0,3"
-                           FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-            </StackPanel>
-            <TextBlock Text="{Binding DriverStatus}" Foreground="{StaticResource MutedBrush}"
-                       Margin="0,4,0,0" TextWrapping="Wrap"/>
-            <TextBlock Text="{Binding CompositorStatus}" Foreground="{StaticResource MutedBrush}"
-                       TextWrapping="Wrap"/>
-        </StackPanel>
-
-        <!-- Body -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel>
-
-                <TextBlock Text="PHYSICAL MONITOR" Style="{StaticResource SectionHeader}"/>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <ComboBox Grid.Column="0"
-                              ItemsSource="{Binding Monitors}"
-                              SelectedItem="{Binding SelectedMonitor}"
-                              DisplayMemberPath="Caption"
-                              IsEnabled="{Binding IsIdle}"/>
-                    <Button Grid.Column="1" Content="Rescan" Margin="8,0,0,0"
-                            Command="{Binding RefreshMonitorsCommand}"/>
-                </Grid>
-
-                <!-- Current mode + max refresh readout -->
-                <StackPanel Orientation="Horizontal" Margin="0,8,0,16">
-                    <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
-                            BorderThickness="1" CornerRadius="4" Padding="10,6" Margin="0,0,10,0">
-                        <StackPanel>
-                            <TextBlock Text="CURRENT MODE" Foreground="{StaticResource MutedBrush}"
-                                       FontSize="10" FontWeight="SemiBold"/>
-                            <TextBlock Text="{Binding CurrentModeText}" FontFamily="Consolas" FontSize="13"
-                                       Margin="0,2,0,0"/>
-                        </StackPanel>
-                    </Border>
-                    <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
-                            BorderThickness="1" CornerRadius="4" Padding="10,6">
-                        <StackPanel>
-                            <TextBlock Text="MAX REFRESH — ALL ZONES RUN AT THIS RATE"
-                                       Foreground="{StaticResource MutedBrush}" FontSize="10" FontWeight="SemiBold"/>
-                            <TextBlock Text="{Binding RefreshText}" FontFamily="Consolas" FontSize="13"
-                                       Margin="0,2,0,0"/>
-                        </StackPanel>
-                    </Border>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="DesktopSplitter" FontSize="27" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="VersionLabel" VerticalAlignment="Bottom" Margin="10,0,0,4" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                 </StackPanel>
-
-                <TextBlock Text="STARTUP" Style="{StaticResource SectionHeader}"/>
-                <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
-                        BorderThickness="1" CornerRadius="4" Padding="12,10" Margin="0,0,0,16">
-                    <StackPanel>
-                        <CheckBox Content="Start DesktopSplitter with Windows"
-                                  IsChecked="{Binding StartWithWindows}"
-                                  Foreground="{StaticResource ForegroundBrush}"
-                                  IsEnabled="{Binding IsIdle}"/>
-                        <CheckBox Content="Re-apply the last split automatically when DesktopSplitter starts"
-                                  IsChecked="{Binding ApplyOnStartup}"
-                                  Foreground="{StaticResource ForegroundBrush}"
-                                  IsEnabled="{Binding IsIdle}" Margin="0,8,0,0"/>
-                        <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap"
-                                   Margin="0,8,0,0"
-                                   Text="The split is always torn down when DesktopSplitter exits, so the desktop is never left split with nothing driving it. A split that was still running at exit comes back on the next launch; one you reverted yourself does not."/>
-                    </StackPanel>
-                </Border>
-
-                <TextBlock Text="LAYOUT" Style="{StaticResource SectionHeader}"/>
-                <ListBox ItemsSource="{Binding Layouts}"
-                         SelectedItem="{Binding SelectedLayout}"
-                         ItemTemplate="{StaticResource LayoutItemTemplate}"
-                         ItemContainerStyle="{StaticResource LayoutItemContainerStyle}"
-                         Background="Transparent" BorderThickness="0"
-                         IsEnabled="{Binding IsIdle}"
-                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                         Margin="0,0,0,16">
-                    <ListBox.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <WrapPanel Orientation="Horizontal"/>
-                        </ItemsPanelTemplate>
-                    </ListBox.ItemsPanel>
-                </ListBox>
-
-                <TextBlock Text="ZONE EDITOR — DRAG THE BORDERS, OR TYPE EXACT SIZES BELOW"
-                           Style="{StaticResource SectionHeader}"/>
-
-                <Border Background="{StaticResource CanvasBackground}"
-                        BorderBrush="{StaticResource PanelBorder}" BorderThickness="1"
-                        CornerRadius="5" Padding="14" HorizontalAlignment="Left"
-                        IsEnabled="{Binding IsIdle}">
-                    <Grid x:Name="EditorSurface"
-                          Width="{Binding CanvasWidth}" Height="{Binding CanvasHeight}">
-
-                        <ItemsControl ItemsSource="{Binding Zones}"
-                                      ItemTemplate="{StaticResource ZoneTemplate}"
-                                      ItemContainerStyle="{StaticResource CanvasItemStyle}">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <Canvas/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                        </ItemsControl>
-
-                        <!-- Splitters sit above the zones so they get the hit tests -->
-                        <ItemsControl ItemsSource="{Binding Splitters}"
-                                      ItemTemplate="{StaticResource SplitterTemplate}"
-                                      ItemContainerStyle="{StaticResource CanvasItemStyle}">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <Canvas/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                        </ItemsControl>
-
-                    </Grid>
-                </Border>
-
-                <TextBlock Text="{Binding SumNote}" Foreground="{StaticResource MutedBrush}"
-                           FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0">
-                    <TextBlock.Style>
-                        <Style TargetType="TextBlock">
-                            <Setter Property="Visibility" Value="Collapsed"/>
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding HasSumNote}" Value="True">
-                                    <Setter Property="Visibility" Value="Visible"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </TextBlock.Style>
-                </TextBlock>
-
-                <ItemsControl ItemsSource="{Binding Segments}"
-                              ItemTemplate="{StaticResource SegmentItemTemplate}"
-                              IsEnabled="{Binding IsIdle}"
-                              Margin="0,12,0,0">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <WrapPanel Orientation="Horizontal"/>
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                </ItemsControl>
-
-                <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
-                    <Button Content="Reset to layout defaults" Command="{Binding ResetSegmentsCommand}"/>
-                </StackPanel>
-
-                <!-- ============================ display hiding ============================ -->
-                <TextBlock Text="DISPLAY HIDING (EXPERIMENTAL)" Style="{StaticResource SectionHeader}"/>
-                <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
-                        BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,10"
-                        DataContext="{Binding Hiding}">
-                    <StackPanel>
-                        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11.5"
-                                   Margin="0,0,0,10"
-                                   Text="Removes the physical monitor from the Windows desktop entirely instead of just covering it — the same thing as Settings &gt; Advanced display &gt; &quot;Remove display from desktop&quot;. Enable only records the intent; the monitor is hidden during Apply, once segment 1 is primary, and it comes back automatically unless you confirm within 10 seconds. Revert always restores it."/>
-
-                        <ItemsControl ItemsSource="{Binding Rows}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Grid Margin="0,0,0,6">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="18"/>
-                                            <ColumnDefinition Width="176"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="{Binding Glyph}" FontSize="14"
-                                                   VerticalAlignment="Top">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding State}" Value="Ok">
-                                                            <Setter Property="Foreground" Value="#FF7FD48A"/>
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding State}" Value="No">
-                                                            <Setter Property="Foreground" Value="#FFE0B457"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                        <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="12"
-                                                   VerticalAlignment="Top"/>
-                                        <TextBlock Grid.Column="2" Text="{Binding Detail}" FontSize="11.5"
-                                                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
-                                    </Grid>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-
-                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                            <Button Content="Enable hiding..." Command="{Binding EnableCommand}" MinWidth="140"/>
-                            <Button Content="Disable hiding..." Command="{Binding DisableCommand}"
-                                    Margin="8,0,0,0" MinWidth="140"/>
-                            <Button Content="Re-check" Command="{Binding RefreshCommand}" Margin="8,0,0,0"/>
-                        </StackPanel>
-
-                        <TextBlock Text="{Binding DisabledReason}" Foreground="#FFE0B457"
-                                   FontSize="11.5" TextWrapping="Wrap" Margin="0,10,0,0">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding HasDisabledReason}" Value="True">
-                                            <Setter Property="Visibility" Value="Visible"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                    </StackPanel>
-                </Border>
-
+                <TextBlock Text="하나의 모니터를 내 작업에 맞는 여러 화면으로" Margin="0,4,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
             </StackPanel>
+            <ui:Button Grid.Column="1" Content="트레이로 최소화" Command="{Binding MinimizeToTrayCommand}" VerticalAlignment="Center"/>
+        </Grid>
+
+        <ScrollViewer x:Name="BodyScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,8,0">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="330"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="1. 모니터 선택" Style="{StaticResource SectionHeader}"/>
+                    <ComboBox ItemsSource="{Binding Monitors}" SelectedItem="{Binding SelectedMonitor}" DisplayMemberPath="Caption" IsEnabled="{Binding IsIdle}" ToolTip="분할할 실제 모니터를 선택하세요."/>
+                    <DockPanel Margin="0,8,0,18">
+                        <ui:Button DockPanel.Dock="Right" Content="새로 고침" Command="{Binding RefreshMonitorsCommand}" Margin="8,0,0,0"/>
+                        <TextBlock Text="{Binding CurrentModeText}" VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    </DockPanel>
+                    <TextBlock Text="2. 다음 적용할 분할 방식" Style="{StaticResource SectionHeader}"/>
+                    <ListBox ItemsSource="{Binding Layouts}" SelectedItem="{Binding SelectedLayout}" ItemTemplate="{StaticResource LayoutItemTemplate}"
+                             ItemContainerStyle="{StaticResource LayoutItemContainerStyle}" Background="Transparent" BorderThickness="0"
+                             IsEnabled="{Binding IsIdle}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                        <ListBox.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ListBox.ItemsPanel>
+                    </ListBox>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="3. 화면 상태와 분할 설정" Style="{StaticResource SectionHeader}"/>
+                    <TextBlock Text="{Binding DisplayStateText}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                    <ItemsControl x:Name="LiveSlotsList" ItemsSource="{Binding CurrentSlots}" Margin="0,0,0,8" ToolTip="칸은 현재 배치 위치이며, 화면은 위치를 바꿔도 유지되는 분할 화면 번호입니다. 단축키로 변경한 실제 배치를 표시합니다.">
+                        <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,3,0,0"/></DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Border x:Name="OriginalScreenPreview" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,6,0,14" Height="170">
+                        <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers><DataTrigger Binding="{Binding IsOriginalScreen}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                        </Style></Border.Style>
+                        <TextBlock Text="{Binding OriginalScreenText}" TextAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" FontSize="16"/>
+                    </Border>
+                    <Expander x:Name="SplitEditorExpander" Header="다음 분할 설정 편집" IsExpanded="{Binding IsSplitEditorExpanded, Mode=TwoWay}" Margin="0,0,0,14">
+                    <StackPanel x:Name="SplitEditorContent" Margin="0,12,0,0">
+                        <StackPanel.Style><Style TargetType="StackPanel"><Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers><DataTrigger Binding="{Binding IsSplitEditorExpanded}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                        </Style></StackPanel.Style>
+                    <TextBlock Text="아래 번호와 크기는 다음 분할 적용을 위한 편집 설정입니다." TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    <TextBlock Text="경계선을 끌거나 아래에 픽셀 크기를 입력하세요. 적용 전에는 실제 화면이 바뀌지 않습니다."
+                               TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,12"/>
+                    <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                            BorderThickness="1" CornerRadius="8" Padding="16" IsEnabled="{Binding IsIdle}">
+                        <Viewbox Stretch="Uniform" StretchDirection="DownOnly">
+                            <Grid x:Name="EditorSurface" Width="{Binding CanvasWidth}" Height="{Binding CanvasHeight}">
+                                <ItemsControl ItemsSource="{Binding Zones}" ItemTemplate="{StaticResource ZoneTemplate}" ItemContainerStyle="{StaticResource CanvasItemStyle}">
+                                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><Canvas/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                </ItemsControl>
+                                <ItemsControl ItemsSource="{Binding Splitters}" ItemTemplate="{StaticResource SplitterTemplate}" ItemContainerStyle="{StaticResource CanvasItemStyle}">
+                                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><Canvas/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                </ItemsControl>
+                            </Grid>
+                        </Viewbox>
+                    </Border>
+                    <TextBlock Text="{Binding RefreshText}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                    <TextBlock Text="{Binding SumNote}" Foreground="{DynamicResource SystemFillColorCautionBrush}" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    <ItemsControl ItemsSource="{Binding Segments}" ItemTemplate="{StaticResource SegmentItemTemplate}" IsEnabled="{Binding IsIdle}" Margin="0,12,0,0">
+                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                    <ui:Button Content="선택한 분할의 기본 크기로" Command="{Binding ResetSegmentsCommand}" HorizontalAlignment="Left" Margin="0,0,0,16"/>
+                    </StackPanel>
+                    </Expander>
+
+                    <Border x:Name="MatrixPanel" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,12" IsEnabled="{Binding IsIdle}">
+                        <StackPanel>
+                            <TextBlock Text="분할 매트릭스 · 이 모니터의 선택 칸" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding MatrixStateText}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            <WrapPanel Margin="0,10,0,8">
+                                <WrapPanel.Style><Style TargetType="WrapPanel">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers><DataTrigger Binding="{Binding IsActiveMatrix}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                                </Style></WrapPanel.Style>
+                                <TextBlock Text="선택 칸" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                <ComboBox x:Name="MatrixPrimaryChoice" ItemsSource="{Binding PrimaryChoices}" SelectedItem="{Binding SelectedPrimarySlot}" Width="78" Margin="0,0,10,0"/>
+                                <ui:Button Content="현재 그룹에 지정" Command="{Binding SetPrimaryCommand}" ToolTip="선택한 모니터·분할 방식이 실행 중인 그룹과 같을 때만 지정합니다. Windows 주 모니터는 바꾸지 않습니다."/>
+                            </WrapPanel>
+                            <CheckBox Content="합치기·재분할 시 각 칸의 대표 창 기억" IsChecked="{Binding RememberMatrixWindows}"/>
+                            <TextBlock Text="선택 칸은 배치상 위치를 뜻합니다. 화면을 맞바꿔도 선택 위치는 유지됩니다. 합치기 직전 그 위치의 창을 앞으로 표시하고, 재분할하면 마지막 칸별 창 배치를 복원합니다. Windows 주 모니터와 다른 모니터의 창은 선택 대상으로 사용하지 않습니다. 닫힌 앱은 다시 실행하지 않습니다."
+                                       TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,12" DataContext="{Binding Hiding}">
+                        <StackPanel>
+                            <TextBlock Text="모니터 숨김 · 실험적 기능" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding Summary}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            <TextBlock Text="지원 여부와 현재 숨김 상태는 다릅니다. ‘다음 적용 때 숨김’은 예약 설정이며, 버튼을 눌러도 즉시 숨겨지지 않습니다."
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" FontSize="12" Margin="0,6,0,10"/>
+                            <Expander x:Name="HidingDetailsExpander" Header="지원 여부와 설정 자세히 보기">
+                                <StackPanel Margin="0,8,0,0">
+                                    <ItemsControl ItemsSource="{Binding Rows}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <StackPanel Margin="0,0,0,8">
+                                                <TextBlock><Run Text="{Binding Glyph, Mode=OneWay}"/><Run Text=" "/><Run Text="{Binding Label, Mode=OneWay}" FontWeight="SemiBold"/></TextBlock>
+                                                <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="14,2,0,0"/>
+                                            </StackPanel>
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{Binding DisabledReason}" Foreground="{DynamicResource SystemFillColorCautionBrush}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
+                                </StackPanel>
+                            </Expander>
+                            <WrapPanel Margin="0,10,0,0">
+                                <ui:Button Content="다음 적용 때 숨김" Command="{Binding EnableCommand}" Margin="0,0,8,6"/>
+                                <ui:Button Content="숨김 예약 해제" Command="{Binding DisableCommand}" Margin="0,0,8,6"/>
+                                <ui:Button Content="{Binding RefreshLabel}" Command="{Binding RefreshCommand}" Margin="0,0,0,6"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                    <Expander x:Name="ShortcutsExpander" Header="단축키 · 화면 배치와 선택 칸" Margin="0,0,0,12" DataContext="{Binding Shortcuts}"
+                              IsEnabled="{Binding DataContext.IsIdle, RelativeSource={RelativeSource AncestorType={x:Type Window}}}">
+                        <StackPanel Margin="0,12,0,0">
+                            <ui:ToggleSwitch Content="전역 단축키 사용" IsChecked="{Binding Enabled}"/>
+                            <TextBlock Text="선택 칸 선택, 화면 배치 변경, 앱 열기, 분할 적용·복원의 키 조합을 아래에서 변경할 수 있습니다. 변경 후 설정을 저장해 주세요."
+                                       TextWrapping="Wrap" FontSize="12" Margin="0,8,0,12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                            <ItemsControl ItemsSource="{Binding ArrangementRows}" ItemTemplate="{StaticResource ShortcutRowTemplate}"/>
+                            <Expander x:Name="WindowShortcutsExpander" Header="이 그룹의 선택 칸" Margin="0,4,0,10">
+                                <ItemsControl ItemsSource="{Binding PrimaryRows}" ItemTemplate="{StaticResource ShortcutRowTemplate}" Margin="0,10,0,0"/>
+                            </Expander>
+                            <Expander x:Name="AppShortcutsExpander" Header="앱 열기 · 분할 적용 · 복원 키" Margin="0,4,0,10">
+                                <ItemsControl ItemsSource="{Binding AppRows}" ItemTemplate="{StaticResource ShortcutRowTemplate}" Margin="0,10,0,0"/>
+                            </Expander>
+                            <WrapPanel Margin="0,4,0,0">
+                                <ui:Button Content="단축키 설정 저장" Command="{Binding SaveCommand}" Appearance="Primary" Margin="0,0,8,6"/>
+                                <ui:Button Content="기본 키" Command="{Binding ResetCommand}" Margin="0,0,8,6"/>
+                            </WrapPanel>
+                            <TextBlock Text="{Binding Status, Mode=OneWay}" TextWrapping="Wrap" FontSize="12" Margin="0,6,0,0"/>
+                            <TextBlock Text="F12는 Windows 예약 키여서 제외합니다. 다른 앱과 겹치면 키를 변경하세요. 노트북은 Fn 잠금 설정이 필요할 수 있습니다."
+                                       TextWrapping="Wrap" FontSize="12" Margin="0,8,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        </StackPanel>
+                    </Expander>
+                    <Expander x:Name="SafetyPreferencesExpander" Header="안전 복원 및 시작 설정" Margin="0,0,0,12">
+                        <StackPanel Margin="0,12,0,0">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                <TextBlock Text="미확인 시 자동 복원 대기(초)" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <TextBox Text="{Binding SafetyConfirmationSeconds, UpdateSourceTrigger=LostFocus, ValidatesOnExceptions=True}" Width="74" IsEnabled="{Binding IsIdle}"/>
+                            </StackPanel>
+                            <ui:ToggleSwitch Content="Windows 시작 시 실행" IsChecked="{Binding StartWithWindows}" IsEnabled="{Binding IsIdle}"/>
+                            <ui:ToggleSwitch IsChecked="{Binding ApplyOnStartup}" IsEnabled="{Binding IsIdle}" Margin="0,10,0,0">
+                                <TextBlock Text="앱 시작 시 마지막 분할 자동 적용" TextWrapping="Wrap"/>
+                            </ui:ToggleSwitch>
+                            <TextBlock Text="수동 검토 모드에서는 자동 적용·복구·종료 시 자동 복원을 건너뜁니다. 일반 실행에서는 저장된 자동 실행 설정이 적용됩니다."
+                                       TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,10,0,0"/>
+                        </StackPanel>
+                    </Expander>
+                </StackPanel>
+            </Grid>
         </ScrollViewer>
 
-        <!-- Actions -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,14,0,10">
-            <Button Content="Apply" Style="{StaticResource PrimaryButton}" MinWidth="110"
-                    Command="{Binding ApplyCommand}"/>
-            <Button Content="Revert" Margin="10,0,0,0" MinWidth="110"
-                    Command="{Binding RevertCommand}"/>
-            <Button Content="Minimize to tray" Margin="10,0,0,0"
-                    Command="{Binding MinimizeToTrayCommand}"/>
-        </StackPanel>
-
-        <!-- Status -->
-        <Border Grid.Row="3" Background="{StaticResource PanelBackground}"
-                BorderBrush="{StaticResource PanelBorder}" BorderThickness="1" CornerRadius="4">
-            <TextBox x:Name="StatusBox"
-                     Text="{Binding StatusText, Mode=OneWay}"
-                     IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
-                     BorderThickness="0" Background="Transparent"
-                     FontSize="11.5"
-                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+        <Border Grid.Row="2" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,14,0,10">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                    <TextBlock Text="{Binding DriverStatus}" TextWrapping="Wrap" FontSize="12"/>
+                    <TextBlock Text="{Binding CompositorStatus}" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,4,0,0"/>
+                    <TextBlock Text="{Binding Hiding.Summary}" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,4,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <ui:Button x:Name="CancelOperationButton" Content="작업 취소" Command="{Binding CancelOperationCommand}" Margin="0,0,10,0" Padding="14,12">
+                        <ui:Button.Style><Style TargetType="ui:Button" BasedOn="{StaticResource DefaultUiButtonStyle}">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers><DataTrigger Binding="{Binding IsBusy}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                        </Style></ui:Button.Style>
+                    </ui:Button>
+                    <ui:Button x:Name="RevertButton" Content="원래 화면으로 복원" Command="{Binding RevertCommand}" Margin="0,0,10,0" Padding="14,12"/>
+                    <ui:Button x:Name="ApplyButton" Content="분할 적용" Appearance="Primary" Command="{Binding ApplyCommand}" MinWidth="110" Padding="14,12"/>
+                </StackPanel>
+            </Grid>
         </Border>
-
+        <Expander Grid.Row="3" Header="작업 기록 · 오류 상세" IsExpanded="False">
+            <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Margin="0,8,0,0">
+                <TextBox x:Name="StatusBox" Text="{Binding StatusText, Mode=OneWay}" Height="88" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" FontSize="12" VerticalScrollBarVisibility="Auto" Padding="8"/>
+            </Border>
+        </Expander>
     </Grid>
 </Window>

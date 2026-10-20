@@ -238,6 +238,10 @@ internal static class NativeMethods
         ref uint numModeInfoArrayElements, [Out] DISPLAYCONFIG_MODE_INFO[] modeInfoArray,
         IntPtr currentTopologyId);
 
+    [DllImport("user32.dll", ExactSpelling = true)]
+    internal static extern int SetDisplayConfig(uint pathCount, [In] DISPLAYCONFIG_PATH_INFO[] paths,
+        uint modeCount, [In] DISPLAYCONFIG_MODE_INFO[] modes, uint flags);
+
     [DllImport("user32.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
     internal static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_SOURCE_DEVICE_NAME requestPacket);
 

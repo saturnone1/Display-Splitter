@@ -7,6 +7,8 @@
 // Exit code 0 = all passed, 1 = at least one failure.
 
 #include "../src/Geometry.h"
+#include "../src/LiveLayout.h"
+#include "../src/FrameTiming.h"
 
 #include <cstdio>
 #include <cwchar>
@@ -327,6 +329,41 @@ int wmain() {
     TestOverlap();
     TestRescuePlacement();
     TestUnionIsSingleRect();
+
+    CheckBool(IdentityRouting(4) == 0x445304E4u, true, L"live layout wire format");
+    CheckBool(ValidRouting(IdentityRouting(4), 4), true, L"identity routing valid");
+    CheckBool(ValidRouting(0x44530427u, 4), true, L"swap source zero and three");
+    CheckBool(ValidRouting(0x44530400u, 4), false, L"duplicate capture source rejected");
+    CheckBool(ValidRouting(0x445302E4u, 2), false, L"unused routing bits rejected");
+    CheckBool(ValidRouting(0x445304E4u, 3), false, L"stale segment count rejected");
+    std::atomic<uint32_t> routing{IdentityRouting(4)};
+    CheckBool(ExchangeRouting(routing, 4, 0x445304E4u, 0x44530427u), true, L"live slot swap committed");
+    CheckBool(ExchangeRouting(routing, 4, 0x445304E4u, 0x445304E4u), false, L"stale client swap rejected");
+    CheckBool(ExchangeRouting(routing, 4, 0x44530427u, 0x44530400u), false, L"invalid update rejected");
+    CheckBool(routing.load() == 0x44530427u, true, L"rejected update retained routing");
+    CheckBool(ExchangeRouting(routing, 4, 0x44530427u, 0x445304E4u), true, L"failed transaction routing rollback");
+    AppConfig config;
+    config.physicalDevice = L"P";
+    for (int i = 0; i < 4; ++i) {
+        SegmentConfig segment;
+        segment.virtualDevice = L"V" + std::to_wstring(i);
+        segment.width = 100;
+        segment.height = 100;
+        segment.physRect = { (i % 2) * 100, (i / 2) * 100, 100, 100 };
+        config.segments.push_back(segment);
+    }
+    CheckBool(LayoutFingerprint(config) == 0x586EFB67u, true, L"C# and C++ config fingerprint");
+    config.segments[1].physRect.w++;
+    CheckBool(LayoutFingerprint(config) != 0x586EFB67u, true, L"stale slot geometry detected");
+
+    FrameTiming<4> timing;
+    CheckBool(timing.Percentile(0.95) == 0, true, L"empty frame sample is defined");
+    for (double value : { 1.0, 2.0, 3.0, 4.0 }) timing.Add(value);
+    CheckBool(timing.Percentile(0.5) == 2 && timing.Percentile(0.95) == 4, true, L"frame percentiles use nearest rank");
+    timing.Add(5);
+    CheckBool(timing.Count() == 4 && timing.Percentile(0) == 2 && timing.Percentile(1) == 5, true, L"frame samples stay bounded and replace oldest");
+    timing.Add(-1);
+    CheckBool(timing.Percentile(0) == 2, true, L"invalid frame sample ignored");
 
     ::wprintf(L"\n=====================\n");
     ::wprintf(L"%d passed, %d failed\n", g_passed, g_failed);

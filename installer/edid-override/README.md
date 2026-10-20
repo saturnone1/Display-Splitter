@@ -285,7 +285,7 @@ re-enumerate the monitor:
     installer\edid-override\edidoverride.vcxproj -p:Configuration=Release -p:Platform=x64
 ```
 
-C++17, `/W4 /WX`, no dependencies beyond `advapi32`/`user32`. The patch logic is
+C++20, `/W4 /WX`, no dependencies beyond `advapi32`/`user32`. The patch logic is
 header-only in `EdidPatch.h` so `selftest` runs exactly the code `apply` runs.
 
 ## Caveats

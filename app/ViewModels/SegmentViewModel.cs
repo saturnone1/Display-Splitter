@@ -19,7 +19,7 @@ public sealed class SegmentViewModel : ObservableObject
 
     public int Index { get; }
 
-    public string Title => $"Zone {Index + 1}";
+    public string Title => $"화면 {Index + 1}";
 
     public string WidthText
     {
@@ -65,14 +65,14 @@ public sealed class SegmentViewModel : ObservableObject
     {
         if (!int.TryParse(_widthText, out int w) || !int.TryParse(_heightText, out int h))
         {
-            Error = "Enter whole numbers.";
+            Error = "가로와 세로를 정수로 입력해 주세요.";
             return;
         }
         int lo = LayoutGeometry.MinSegmentDimension;
         int hi = LayoutGeometry.MaxSegmentDimension;
         if (w < lo || w > hi || h < lo || h > hi)
         {
-            Error = $"Width and height must be {lo}..{hi}.";
+            Error = $"가로와 세로는 {lo}~{hi}픽셀이어야 합니다.";
             return;
         }
         Error = string.Empty;

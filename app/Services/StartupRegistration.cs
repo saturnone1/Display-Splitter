@@ -87,12 +87,12 @@ public static class StartupRegistration
             using RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true)
                                    ?? throw new InvalidOperationException("Run key could not be opened.");
             key.SetValue(ValueName, ExpectedCommand, RegistryValueKind.String);
-            log?.Report($"DesktopSplitter will start with Windows ({ExpectedCommand}).");
+            log?.Report($"Windows 시작 시 DesktopSplitter를 실행합니다 ({ExpectedCommand}).");
             return true;
         }
         catch (Exception ex)
         {
-            log?.Report("Could not enable start with Windows: " + ex.Message);
+            log?.Report("시작 프로그램 등록 실패: " + ex.Message);
             return false;
         }
     }
@@ -105,13 +105,13 @@ public static class StartupRegistration
             if (key?.GetValue(ValueName) is not null)
             {
                 key.DeleteValue(ValueName, throwOnMissingValue: false);
-                log?.Report("DesktopSplitter will no longer start with Windows.");
+                log?.Report("Windows 시작 시 자동 실행을 해제했습니다.");
             }
             return true;
         }
         catch (Exception ex)
         {
-            log?.Report("Could not disable start with Windows: " + ex.Message);
+            log?.Report("시작 프로그램 등록 해제 실패: " + ex.Message);
             return false;
         }
     }
@@ -128,7 +128,7 @@ public static class StartupRegistration
         StartupState state = Read();
         if (!state.NeedsRefresh) return;
 
-        log?.Report($"Updating the start-with-Windows entry: it pointed at {state.RegisteredCommand}.");
+        log?.Report($"시작 프로그램의 실행 경로를 갱신합니다. 이전 경로: {state.RegisteredCommand}");
         Enable(log);
     }
 

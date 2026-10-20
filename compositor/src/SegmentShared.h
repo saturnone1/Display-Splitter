@@ -40,6 +40,8 @@ struct SegmentShared {
 
     // Diagnostics.
     std::atomic<uint64_t> framesCaptured{0};
+    // Verbose diagnostics only; these are exchanged by the render thread at report time.
+    std::atomic<uint64_t> acquireCalls{0}, idlePolls{0}, copyTicks{0}, copySamples{0}, stagingBytes{0};
 };
 
 // The single D3D11 device shared by the renderer and (normally) all captures.

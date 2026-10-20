@@ -2,18 +2,19 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using System.Windows.Media;
+using System.ComponentModel;
 using DesktopSplitter.Models;
 
 namespace DesktopSplitter.Views;
 
 /// <summary>
-/// The keep-or-revert safety dialog. The countdown here is cosmetic — the elevated helper owns
-/// the real timer and will auto-revert on its own — so a stalled UI can never strand the display.
+/// The keep-or-revert safety dialog. This monotonic countdown is cosmetic; ConfirmationSession
+/// owns the safety deadline independently of UI rendering.
 /// </summary>
 public partial class CountdownWindow : Window
 {
-    private readonly DispatcherTimer _timer;
-    private DateTime _deadline;
+    private long? _started;
     private bool _answered;
 
     public CountdownWindow(int timeoutSeconds) : this(timeoutSeconds, null, null) { }
@@ -21,15 +22,12 @@ public partial class CountdownWindow : Window
     public CountdownWindow(int timeoutSeconds, string? heading, string? detail)
     {
         InitializeComponent();
+        Services.AppAppearance.AttachWindow(this);
 
         if (!string.IsNullOrEmpty(heading)) HeadingText.Text = heading;
         if (!string.IsNullOrEmpty(detail)) DetailText.Text = detail;
 
         TimeoutSeconds = Math.Max(1, timeoutSeconds);
-        _deadline = DateTime.UtcNow.AddSeconds(TimeoutSeconds);
-
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-        _timer.Tick += (_, _) => UpdateCountdown();
         UpdateCountdown();
     }
 
@@ -44,7 +42,8 @@ public partial class CountdownWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        _timer.Start();
+        _started = TimeProvider.System.GetTimestamp();
+        CompositionTarget.Rendering += OnRendering;
         Activate();
     }
 
@@ -96,15 +95,15 @@ public partial class CountdownWindow : Window
 
     private void UpdateCountdown()
     {
-        double remaining = (_deadline - DateTime.UtcNow).TotalSeconds;
+        double remaining = TimeoutSeconds - (_started.HasValue ? TimeProvider.System.GetElapsedTime(_started.Value).TotalSeconds : 0);
         if (remaining < 0) remaining = 0;
 
         CountdownText.Text = Math.Ceiling(remaining).ToString("0");
 
         if (remaining <= 0 && !_answered)
         {
-            _timer.Stop();
-            CountdownCaption.Text = "reverting…";
+            CompositionTarget.Rendering -= OnRendering;
+            CountdownCaption.Text = "복원 중…";
             KeepButton.IsEnabled = false;
             RevertButton.IsEnabled = false;
         }
@@ -113,7 +112,7 @@ public partial class CountdownWindow : Window
     /// <summary>Closes the dialog because the helper finished on its own.</summary>
     public void CloseFromHelper()
     {
-        _timer.Stop();
+        CompositionTarget.Rendering -= OnRendering;
         _answered = true;
         try { Close(); } catch (InvalidOperationException) { /* already closing */ }
     }
@@ -126,14 +125,26 @@ public partial class CountdownWindow : Window
     {
         if (_answered) return;
         _answered = true;
-        _timer.Stop();
+        CompositionTarget.Rendering -= OnRendering;
         Decision = keep;
 
         KeepButton.IsEnabled = false;
         RevertButton.IsEnabled = false;
-        CountdownCaption.Text = keep ? "keeping…" : "reverting…";
+        CountdownCaption.Text = keep ? "설정 유지 중…" : "복원 중…";
 
         Answered?.Invoke(keep);
+    }
+
+    private void OnRendering(object? sender, EventArgs e) => UpdateCountdown();
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (!_answered) Answer(false);
+        base.OnClosing(e);
+    }
+    protected override void OnClosed(EventArgs e)
+    {
+        CompositionTarget.Rendering -= OnRendering;
+        base.OnClosed(e);
     }
 
     // ------------------------------------------------------------------ P/Invoke

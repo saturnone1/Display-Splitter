@@ -7,10 +7,7 @@ namespace DesktopSplitter.Services;
 /// <summary>Reads/writes %APPDATA%\DesktopSplitter\settings.json (last applied UI state).</summary>
 public static class SettingsStore
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        WriteIndented = true,
-    };
+    private static readonly SettingsFile Store = new(FilePath);
 
     public static string Directory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DesktopSplitter");
@@ -18,23 +15,11 @@ public static class SettingsStore
     public static string FilePath => Path.Combine(Directory, "settings.json");
 
     public static AppSettings? Load()
-    {
-        try
-        {
-            if (!File.Exists(FilePath)) return null;
-            string json = File.ReadAllText(FilePath);
-            return JsonSerializer.Deserialize<AppSettings>(json, Options);
-        }
-        catch
-        {
-            // A corrupt settings file must never stop the app from starting.
-            return null;
-        }
-    }
+        => Store.Load();
 
     public static void Save(AppSettings settings)
-    {
-        System.IO.Directory.CreateDirectory(Directory);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(settings, Options));
-    }
+        => Store.Save(settings);
+
+    public static void Update(Action<AppSettings> update)
+        => Store.Update(update);
 }

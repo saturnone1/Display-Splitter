@@ -51,7 +51,7 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <SDLCheck>true</SDLCheck>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>true</ConformanceMode>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <AdditionalIncludeDirectories>$(ProjectDir)..\..\shared;$(ProjectDir)..\common;$(ProjectDir)..\..\build\generated;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -87,6 +87,7 @@
     <PropertyGroup>
       <_DeskSplitStageArgs Condition="'$(DeskSplitSkipAppPublish)' == 'true'">-SkipAppPublish</_DeskSplitStageArgs>
       <_DeskSplitStageArgs Condition="'$(Configuration)' != ''">$(_DeskSplitStageArgs) -Configuration Release</_DeskSplitStageArgs>
+      <_DeskSplitStageArgs Condition="'$(DeskSplitDriverPackageDir)' != ''">$(_DeskSplitStageArgs) -PackageDir &quot;$(DeskSplitDriverPackageDir)&quot;</_DeskSplitStageArgs>
     </PropertyGroup>
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)stage-payload.ps1&quot; $(_DeskSplitStageArgs)" />
   </Target>

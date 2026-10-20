@@ -2,18 +2,14 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- Spec target. Built here with the .NET 10 SDK against the installed
-         .NET 8 targeting pack / desktop runtime (no 8.x SDK on this machine).
-         (The WinRT platform suffix that the retired EDID-override panel needed for
-         DisplayMonitor.UsageKind is gone: UsageKind is an unreliable success signal, and
-         monitor specialization is read through plain DisplayConfig instead.) -->
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- Keep the portable Windows TFM: Windows 10 21H2 must not require Windows 11 APIs. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>AnyCPU;x64</Platforms>
 
     <UseWPF>true</UseWPF>
-    <!-- WinForms is enabled purely for NotifyIcon (tray). No external packages. -->
+    <!-- WinForms is enabled purely for NotifyIcon (tray). -->
     <UseWindowsForms>true</UseWindowsForms>
 
     <AssemblyName>DesktopSplitter</AssemblyName>
@@ -23,16 +19,25 @@
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\App.ico</ApplicationIcon>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Product>DesktopSplitter</Product>
     <Company>DesktopSplitter</Company>
     <AssemblyTitle>DesktopSplitter control app</AssemblyTitle>
-    <!-- WFAC010 tells WinForms apps to configure DPI via ApplicationHighDpiMode. This is a
-         WPF app that only borrows NotifyIcon, so PerMonitorV2 belongs in app.manifest. -->
-    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <!-- WPF owns DPI awareness through the PerMonitorV2 manifest. WinForms is used only
+         for NotifyIcon, so its .NET 8 and .NET 10 app-startup DPI analyzers do not apply. -->
+    <NoWarn>$(NoWarn);WFAC010;WFO0003</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\Fonts\*.ttf"/>
+    <Resource Include="Assets\App.ico"/>
+    <None Update="Assets\Fonts\LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"/>
+    <None Update="Assets\Fonts\NOTICE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"/>
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- tools\ holds standalone diagnostic programs (separate projects). They must never be

@@ -91,12 +91,14 @@ inline const wchar_t* PresenterKindName(PresenterKind k) {
 // Keep polling for the target to become acquirable?
 inline bool ShouldKeepWaiting(int waitSeconds, double elapsedSeconds, bool acquired) {
     if (acquired) return false;              // got it - stop
-    if (waitSeconds <= 0) return false;      // waiting disabled - one attempt only
+    if (waitSeconds < 0) return true;        // explicit, cancellable acquisition wait
+    if (waitSeconds == 0) return false;      // waiting disabled - one attempt only
     return elapsedSeconds < static_cast<double>(waitSeconds);
 }
 
 // Seconds still left on the wait, for the countdown log line.
 inline int WaitSecondsRemaining(int waitSeconds, double elapsedSeconds) {
+    if (waitSeconds < 0) return -1;
     const double left = static_cast<double>(waitSeconds) - elapsedSeconds;
     if (left <= 0.0) return 0;
     return static_cast<int>(left + 0.5);

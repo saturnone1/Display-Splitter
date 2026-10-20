@@ -8,6 +8,7 @@
 // Exit code 0 = all passed, 1 = at least one failure.
 
 #include "../src/PresenterSelect.h"
+#include "../src/DisplayTaskCompat.h"
 
 #include <cstdio>
 #include <string>
@@ -18,6 +19,36 @@ namespace {
 
 int g_passed = 0;
 int g_failed = 0;
+
+namespace display = winrt::Windows::Devices::Display::Core;
+
+// COM test doubles expose the same interface boundaries as Windows 10/11.
+// No DisplayManager is activated and no real display task is submitted.
+struct LegacyPool : winrt::implements<LegacyPool, display::IDisplayTaskPool> {
+    unsigned submissions = 0;
+    bool fail = false;
+    display::DisplayTask CreateTask() { return nullptr; }
+    void ExecuteTask(const display::DisplayTask&) {
+        ++submissions;
+        if (fail) throw winrt::hresult_access_denied();
+    }
+};
+
+struct TaskResult : winrt::implements<TaskResult, display::IDisplayTaskResult> {
+    display::DisplayPresentStatus PresentStatus() { return display::DisplayPresentStatus::ScanoutInvalid; }
+    uint64_t PresentId() { return 42; }
+    display::DisplaySourceStatus SourceStatus() { return display::DisplaySourceStatus::Active; }
+};
+
+struct ModernPool : winrt::implements<ModernPool, display::IDisplayTaskPool2> {
+    unsigned submissions = 0;
+    bool fail = false;
+    display::DisplayTaskResult TryExecuteTask(const display::DisplayTask&) {
+        ++submissions;
+        if (fail) throw winrt::hresult_access_denied();
+        return winrt::make<TaskResult>().as<display::DisplayTaskResult>();
+    }
+};
 
 void Check(bool ok, const wchar_t* name, const std::wstring& detail) {
     if (ok) {
@@ -184,6 +215,9 @@ void TestWaitForTarget() {
 
     Check(!ShouldKeepWaiting(0, 0.0, false),
           L"waiting disabled: a single attempt, no polling", L"");
+    Check(ShouldKeepWaiting(-1, 1000000.0, false), L"explicit acquisition wait has no forced deadline", L"");
+    Check(!ShouldKeepWaiting(-1, 0.0, true), L"unbounded wait ends once acquisition succeeds", L"");
+    Check(WaitSecondsRemaining(-1, 1000000.0) == -1, L"unbounded wait has no countdown", L"");
     Check(ShouldKeepWaiting(30, 0.0, false),
           L"wait enabled: keeps polling at t=0", L"");
     Check(ShouldKeepWaiting(30, 29.9, false),
@@ -311,6 +345,37 @@ void TestFailureOnlyMeaningfulWhenSpecialized() {
           L"...and that fallback still exits 0, not kDisplayLost", L"");
 }
 
+void TestWindows10TaskSubmission() {
+    auto legacy = winrt::make_self<LegacyPool>();
+    const auto pool = legacy.as<display::IDisplayTaskPool>();
+    const auto absent = pool.try_as<display::IDisplayTaskPool2>();
+    Check(!absent, L"Windows 10 pool has no v13 task interface", L"");
+    const auto oldResult = SubmitDisplayTask(pool, absent, nullptr);
+    Check(!oldResult && legacy->submissions == 1,
+          L"Windows 10 submits once using ExecuteTask without inventing result feedback", L"");
+
+    auto modern = winrt::make_self<ModernPool>();
+    const auto extended = modern.as<display::IDisplayTaskPool2>();
+    const auto result = SubmitDisplayTask(pool, extended, nullptr);
+    Check(result && result->PresentStatus() == display::DisplayPresentStatus::ScanoutInvalid &&
+          result->PresentId() == 42 && modern->submissions == 1 && legacy->submissions == 1,
+          L"Windows 11 preserves refusal feedback without also submitting through the legacy API", L"");
+
+    modern->fail = true;
+    bool caught = false;
+    try { (void)SubmitDisplayTask(pool, extended, nullptr); }
+    catch (const winrt::hresult_access_denied&) { caught = true; }
+    Check(caught && modern->submissions == 2 && legacy->submissions == 1,
+          L"modern submission failure propagates without resubmission", L"");
+
+    legacy->fail = true;
+    caught = false;
+    try { (void)SubmitDisplayTask(pool, absent, nullptr); }
+    catch (const winrt::hresult_access_denied&) { caught = true; }
+    Check(caught && legacy->submissions == 2,
+          L"legacy submission HRESULT failure propagates to runtime recovery", L"");
+}
+
 } // namespace
 
 int wmain() {
@@ -318,6 +383,7 @@ int wmain() {
     ::wprintf(L"======================\n");
 
     TestNotRequested();
+    TestWindows10TaskSubmission();
     TestHappyPath();
     TestFallbackLadder();
     TestDetailPropagation();

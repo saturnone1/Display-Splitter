@@ -15,48 +15,41 @@ public sealed class ApplyConfirmer : IApplyConfirmer
 {
     private readonly IHidingUi _ui;
     private readonly Action<string> _log;
+    private readonly TimeProvider _clock;
 
-    public ApplyConfirmer(IHidingUi ui, Action<string> log)
+    public ApplyConfirmer(IHidingUi ui, Action<string> log, TimeProvider? clock = null)
     {
         _ui = ui;
         _log = log;
+        _clock = clock ?? TimeProvider.System;
     }
 
     public bool ConfirmApply(string summary, int timeoutSeconds, CancellationToken ct)
     {
         System.Windows.Threading.Dispatcher? dispatcher = System.Windows.Application.Current?.Dispatcher;
-        if (dispatcher is null) return true;   // headless: nothing to confirm against
+        if (dispatcher is null || dispatcher.HasShutdownStarted) return false;
 
-        using var answered = new ManualResetEventSlim(false);
-        int keep = 0;
+        var session = new ConfirmationSession();
         ICountdownHandle? handle = null;
 
-        dispatcher.Invoke(() =>
-        {
-            handle = _ui.ShowApplyCountdown(
-                summary, timeoutSeconds,
-                onKeep: () => { Interlocked.Exchange(ref keep, 1); answered.Set(); },
-                onRevert: () => { Interlocked.Exchange(ref keep, 0); answered.Set(); });
-        });
-
-        bool gotAnswer;
+        // Start the safety deadline before queuing UI work. A stalled dispatcher cannot delay it.
+        Task<bool> decision = session.WaitAsync(TimeSpan.FromSeconds(timeoutSeconds), ct, _clock);
         try
         {
-            gotAnswer = answered.Wait(TimeSpan.FromSeconds(timeoutSeconds + 1), ct);
+            dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (session.IsCompleted) return;
+                try { handle = _ui.ShowApplyCountdown(summary, timeoutSeconds, session.Keep, session.Revert); }
+                catch { session.Revert(); }
+            }));
+            bool keep = decision.GetAwaiter().GetResult();
+            if (!keep) _log("설정 유지를 확인하지 않아 복원합니다.");
+            return keep;
         }
-        catch (OperationCanceledException)
+        finally
         {
-            dispatcher.Invoke(() => handle?.CloseFromHelper());
-            return false;
+            session.Revert();
+            if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvoke(new Action(() => handle?.CloseFromHelper()));
         }
-
-        dispatcher.Invoke(() => handle?.CloseFromHelper());
-
-        if (!gotAnswer)
-        {
-            _log($"No answer within {timeoutSeconds}s — reverting the change automatically.");
-            return false;
-        }
-        return Volatile.Read(ref keep) == 1;
     }
 }

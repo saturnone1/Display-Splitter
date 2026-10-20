@@ -88,7 +88,7 @@ public static class DriverClient
         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
     public const string DriverMissingMessage =
-        "Driver device not found — install the driver first (installer\\install-driver.ps1).";
+        "가상 디스플레이 드라이버가 설치되어 있지 않거나 장치가 연결되지 않았습니다. 레이아웃 편집은 가능하지만 실제 분할에는 드라이버를 별도로 설치해야 합니다.";
 
     /// <summary>Builds an all-zero-but-valid config with room for the fixed arrays.</summary>
     public static DESKSPLIT_CONFIG NewConfig()

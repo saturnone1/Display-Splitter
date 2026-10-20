@@ -98,26 +98,40 @@ public sealed class HidingViewModel : ObservableObject
 {
     private readonly Func<MonitorInfo?> _selectedMonitor;
     private readonly Action<string> _log;
+    private readonly bool _previewOnly;
+    private readonly Func<MonitorInfo?, HidingSnapshot> _query;
+    private Task<HidingSnapshot>? _pendingQuery;
+    private MonitorInfo? _pendingMonitor;
+    private CancellationTokenSource? _queryWait;
+    private bool _isChecking;
+    private string _summary = "아직 확인하지 않음";
 
     private IHidingUi? _ui;
     private bool _busy;
     private string _disabledReason = string.Empty;
     private HidingSnapshot? _snapshot;
 
-    public HidingViewModel(Func<MonitorInfo?> selectedMonitor, Action<string> log)
+    public HidingViewModel(Func<MonitorInfo?> selectedMonitor, Action<string> log, bool previewOnly = false,
+        Func<MonitorInfo?, HidingSnapshot>? query = null)
     {
+        _previewOnly = previewOnly;
+        _query = query ?? HidingStatus.Query;
         _selectedMonitor = selectedMonitor;
         _log = log;
 
         Rows = new ObservableCollection<StatusRowViewModel>
         {
-            new("Windows can hide displays"),
-            new("This monitor can be hidden"),
-            new("Hidden right now"),
-            new("Hide during Apply"),
+            new("Windows 지원 여부"),
+            new("선택 모니터 지원 여부"),
+            new("현재 실제 숨김 상태"),
+            new("다음 적용 시 숨김"),
         };
 
-        RefreshCommand = new RelayCommand(async () => await RefreshAsync().ConfigureAwait(false), () => !IsBusy);
+        RefreshCommand = new RelayCommand(async () =>
+        {
+            if (IsChecking) CancelRefresh();
+            else await RefreshAsync().ConfigureAwait(true);
+        }, () => !IsBusy);
         EnableCommand = new RelayCommand(async () => await SetIntentAsync(true).ConfigureAwait(false),
                                          () => CanEnable);
         DisableCommand = new RelayCommand(async () => await SetIntentAsync(false).ConfigureAwait(false),
@@ -153,38 +167,95 @@ public sealed class HidingViewModel : ObservableObject
     }
 
     public bool HasDisabledReason => !string.IsNullOrEmpty(_disabledReason);
+    public string Summary { get => _summary; private set => SetProperty(ref _summary, value); }
+    public bool IsChecking
+    {
+        get => _isChecking;
+        private set { if (SetProperty(ref _isChecking, value)) { OnPropertyChanged(nameof(RefreshLabel)); RaiseStates(); } }
+    }
+    public string RefreshLabel => IsChecking ? "조회 취소" : "상태 확인";
+    public void CancelRefresh() => _queryWait?.Cancel();
 
     /// <summary>Whether Apply should try to hide the physical monitor.</summary>
     public bool IntentOn => _snapshot?.IntentOn ?? false;
 
-    public bool CanEnable => !IsBusy && _snapshot is { Available: true, IntentOn: false, SplitActive: false }
+    public bool CanEnable => !_previewOnly && !IsBusy && !IsChecking && _snapshot is { Available: true, IntentOn: false, SplitActive: false }
                              && _selectedMonitor() is not null;
 
-    public bool CanDisable => !IsBusy && _snapshot is { IntentOn: true, SplitActive: false };
+    public bool CanDisable => !_previewOnly && !IsBusy && !IsChecking && _snapshot is { IntentOn: true, SplitActive: false };
 
     // ------------------------------------------------------------------ status
 
     public async Task RefreshAsync()
     {
-        MonitorInfo? selected = _selectedMonitor();
-        HidingSnapshot snapshot = await Task.Run(() => HidingStatus.Query(selected)).ConfigureAwait(true);
-
-        _snapshot = snapshot;
-        IReadOnlyList<StatusRow> rows = snapshot.Rows;
-        for (int i = 0; i < Rows.Count && i < rows.Count; i++) Rows[i].Update(rows[i]);
-
-        DisabledReason = ComputeDisabledReason(snapshot, selected);
-        OnPropertyChanged(nameof(IntentOn));
-        RaiseStates();
+        if (_previewOnly)
+        {
+            Summary = "검토 전용 모드";
+            DisabledReason = "이 검토 모드에서는 모니터 숨김을 변경하지 않습니다.";
+            return;
+        }
+        if (IsChecking) return;
+        using var wait = new CancellationTokenSource();
+        _queryWait = wait;
+        IsChecking = true;
+        Summary = "상태 확인 중…";
+        try
+        {
+            HidingSnapshot snapshot;
+            MonitorInfo? selected;
+            while (true)
+            {
+                selected = _selectedMonitor();
+                if (_pendingQuery is null || _pendingQuery.IsCompleted)
+                {
+                    _pendingMonitor = selected;
+                    _pendingQuery = Task.Run(() => _query(selected));
+                    _ = _pendingQuery.ContinueWith(task => _ = task.Exception, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                }
+                snapshot = await _pendingQuery.WaitAsync(wait.Token).ConfigureAwait(true);
+                _pendingQuery = null;
+                if (ReferenceEquals(_pendingMonitor, _selectedMonitor())) break;
+                wait.Token.ThrowIfCancellationRequested();
+            }
+            _snapshot = snapshot;
+            IReadOnlyList<StatusRow> rows = snapshot.Rows;
+            for (int i = 0; i < Rows.Count && i < rows.Count; i++) Rows[i].Update(rows[i]);
+            Summary = snapshot.CurrentlySpecialized.State == CheckState.Unknown ? "현재 상태 확인 불가"
+                : snapshot.EnabledNow ? "현재 모니터가 숨겨져 있음" : "현재 모니터는 숨겨져 있지 않음";
+            DisabledReason = ComputeDisabledReason(snapshot, selected);
+        }
+        catch (OperationCanceledException) when (wait.IsCancellationRequested)
+        {
+            _snapshot = null;
+            Summary = "상태 조회 취소됨";
+            DisabledReason = "조회 대기를 취소했습니다. 디스플레이 설정은 변경하지 않았습니다.";
+            foreach (var row in Rows) row.Update(new StatusRow(row.Label, CheckState.Unknown, "조회 취소됨"));
+        }
+        catch (Exception ex)
+        {
+            _snapshot = null;
+            Summary = "현재 상태 확인 불가";
+            DisabledReason = "상태를 읽지 못했습니다: " + ex.Message;
+            foreach (var row in Rows) row.Update(new StatusRow(row.Label, CheckState.Unknown, "확인 불가"));
+            _log(DisabledReason);
+        }
+        finally
+        {
+            _queryWait = null;
+            IsChecking = false;
+            OnPropertyChanged(nameof(IntentOn));
+            RaiseStates();
+        }
     }
 
     private static string ComputeDisabledReason(HidingSnapshot snapshot, MonitorInfo? selected)
     {
-        if (selected is null) return "Select a physical monitor first.";
+        if (selected is null) return "먼저 모니터를 선택해 주세요.";
         if (snapshot.SplitActive)
-            return "A split is active. Press Revert first — display hiding is turned on and off during Apply.";
+            return "분할이 실행 중입니다. 숨김 설정을 바꾸려면 먼저 ‘원래 화면으로 복원’을 실행해 주세요.";
         if (!snapshot.Available && !snapshot.IntentOn)
-            return "Windows reports this monitor cannot be removed from the desktop, so hiding would do nothing.";
+            return "현재 Windows 또는 모니터에서는 숨김 기능을 사용할 수 없거나 지원 여부를 확인하지 못했습니다.";
         return string.Empty;
     }
 
@@ -207,7 +278,7 @@ public sealed class HidingViewModel : ObservableObject
         if (enable && !CanEnable) return;
         if (!enable && !CanDisable) return;
 
-        string title = enable ? "Enable display hiding" : "Disable display hiding";
+        string title = enable ? "다음 적용 때 모니터 숨기기" : "모니터 숨김 예약 해제";
         if (!ui.Confirm(title, BuildExplanation(target, enable))) return;
 
         IsBusy = true;
@@ -228,32 +299,31 @@ public sealed class HidingViewModel : ObservableObject
 
     private static string BuildExplanation(MonitorInfo? target, bool enable)
     {
-        string name = target?.DisplayLabel ?? "the selected monitor";
+        string name = target?.DisplayLabel ?? "선택한 모니터";
 
         if (!enable)
         {
             return
-                "Apply will stop removing the physical monitor from the desktop." +
+                "다음 분할 적용부터 실제 모니터를 숨기지 않습니다." +
                 Environment.NewLine + Environment.NewLine +
-                "If a split is running right now, press Revert to put the monitor back.";
+                "이미 분할이 실행 중이면 ‘원래 화면으로 복원’을 눌러 주세요. 예약 해제만으로 현재 디스플레이를 바꾸지는 않습니다.";
         }
 
         return
-            $"Target: {name} ({target?.DeviceName}){Environment.NewLine}{Environment.NewLine}" +
-            "This records an intent — nothing changes yet. The next time you press Apply, " +
-            "DesktopSplitter will:" + Environment.NewLine +
-            "  1. Create the virtual monitors and make segment 1 the primary display." + Environment.NewLine +
-            "  2. Remove the physical monitor from the desktop — the same thing as Settings > " +
-            "Advanced display > \"Remove display from desktop\"." + Environment.NewLine +
-            "  3. Start the compositor and wait for it to confirm it is drawing to the hidden display." +
+            $"대상: {name} ({target?.DeviceName}){Environment.NewLine}{Environment.NewLine}" +
+            "지금은 숨김 예약만 저장합니다. 실제 디스플레이는 바뀌지 않습니다. " +
+            "나중에 ‘분할 적용’을 누르면 다음 순서로 진행합니다:" + Environment.NewLine +
+            "  1. 가상 모니터를 만들고 화면 1을 주 모니터로 설정합니다." + Environment.NewLine +
+            "  2. 실제 모니터를 Windows 바탕 화면에서 제외합니다." + Environment.NewLine +
+            "  3. 숨긴 모니터에 분할 화면을 출력합니다." +
             Environment.NewLine +
-            $"  4. Ask you to confirm, with a {ApplyService.SpecializationConfirmSeconds}-second countdown." +
+            "  4. 안전 확인 시간 안에 설정 유지 여부를 확인합니다." +
             Environment.NewLine + Environment.NewLine +
-            "If anything looks wrong — or you cannot see the countdown at all — DO NOTHING. " +
-            $"The monitor comes back automatically after {ApplyService.SpecializationConfirmSeconds} seconds " +
-            "and the compositor restarts in its normal windowed mode." +
+            "화면이 보이지 않거나 이상하면 아무것도 누르지 말고 기다려 주세요. " +
+            "안전 확인 시간이 지나면 모니터를 복원하고 " +
+            "일반 화면 합성 방식으로 다시 시작합니다." +
             Environment.NewLine + Environment.NewLine +
-            "Revert always puts the monitor back on the desktop.";
+            "‘원래 화면으로 복원’으로 분할과 모니터 숨김을 되돌릴 수 있습니다.";
     }
 
     // ------------------------------------------------------------------ keep/revert countdown
@@ -281,53 +351,49 @@ public sealed class HidingViewModel : ObservableObject
         /// </summary>
         public bool GuideManualEnable(MonitorInfo physical, SpecializationResult failure, CancellationToken ct)
             => RunGuided(physical, wantEnabled: true,
-                reason: "DesktopSplitter is not allowed to do this itself — Windows refuses the request " +
-                        "from an ordinary application. The compositor is already running and waiting, so " +
-                        "the moment you flip the toggle your split appears on the display.",
+                reason: "Windows에서 앱의 직접 변경 요청을 허용하지 않았습니다. " +
+                        "화면 합성기가 대기 중입니다. Windows 설정에서 변경하면 분할 화면이 표시됩니다.",
                 ct);
 
         /// <summary>Undo could not be done programmatically either — walk the user back out.</summary>
         public void GuideManualDisable(MonitorInfo physical, SpecializationResult failure, CancellationToken ct)
             => RunGuided(physical, wantEnabled: false,
-                reason: "DesktopSplitter could not put the display back by itself, so please undo the " +
-                        "toggle. This window stays here until you do.",
+                reason: "앱이 모니터를 직접 복원하지 못했습니다. Windows 설정에서 모니터 숨김을 해제해 주세요.",
                 ct);
 
         private bool RunGuided(MonitorInfo physical, bool wantEnabled, string reason, CancellationToken ct)
         {
             IHidingUi? ui = _owner._ui;
             System.Windows.Threading.Dispatcher? dispatcher = System.Windows.Application.Current?.Dispatcher;
-            if (ui is null || dispatcher is null) return false;
+            if (ui is null || dispatcher is null || dispatcher.HasShutdownStarted) return false;
 
-            using var finished = new ManualResetEventSlim(false);
-            int succeeded = 0;
+            var session = new ConfirmationSession();
             IGuidedHandle? handle = null;
 
             MonitorInfo? placeOn = PickHostMonitor(physical);
             _owner._log(wantEnabled
-                ? $"Showing the Windows Settings instructions on {placeOn?.DisplayLabel ?? "the only display"}."
-                : $"Showing recovery instructions on {placeOn?.DisplayLabel ?? "the only display"}.");
+                ? $"Windows 설정 안내를 표시할 모니터: {placeOn?.DisplayLabel ?? "유일한 모니터"}."
+                : $"복원 안내를 표시할 모니터: {placeOn?.DisplayLabel ?? "유일한 모니터"}.");
 
-            dispatcher.Invoke(() =>
-            {
-                handle = ui.ShowGuidedSettings(physical, wantEnabled, reason, placeOn, ok =>
-                {
-                    Interlocked.Exchange(ref succeeded, ok ? 1 : 0);
-                    finished.Set();
-                });
-            });
-
+            Task<bool> decision = session.WaitForDecisionAsync(ct);
             try
             {
-                finished.Wait(ct);
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (session.IsCompleted) return;
+                    try { handle = ui.ShowGuidedSettings(physical, wantEnabled, reason, placeOn, ok =>
+                    {
+                        if (ok) session.Keep(); else session.Revert();
+                    }); }
+                    catch { session.Revert(); }
+                }));
+                return decision.GetAwaiter().GetResult();
             }
-            catch (OperationCanceledException)
+            finally
             {
-                dispatcher.Invoke(() => handle?.CloseFromCaller());
-                return false;
+                session.Revert();
+                if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvoke(new Action(() => handle?.CloseFromCaller()));
             }
-
-            return Volatile.Read(ref succeeded) == 1;
         }
 
         private MonitorInfo? PickHostMonitor(MonitorInfo physical)
@@ -338,36 +404,35 @@ public sealed class HidingViewModel : ObservableObject
             IHidingUi? ui = _owner._ui;
             System.Windows.Threading.Dispatcher? dispatcher =
                 System.Windows.Application.Current?.Dispatcher;
-            if (ui is null || dispatcher is null) return false;
+            if (ui is null || dispatcher is null || dispatcher.HasShutdownStarted) return false;
 
-            using var answered = new ManualResetEventSlim(false);
-            int keep = 0;
+            var session = new ConfirmationSession();
             ICountdownHandle? handle = null;
 
             MonitorInfo? placeOn = PickHostMonitor(physical);
             _owner._log(placeOn is null || SameDevice(placeOn.DeviceName, physical.DeviceName)
-                ? "Countdown will appear on the only available display."
-                : $"Countdown will appear on {placeOn.DisplayLabel} ({placeOn.DeviceName}), " +
-                  "away from the hidden monitor.");
+                ? "사용할 수 있는 모니터에 설정 유지 확인 창을 표시합니다."
+                : $"설정 유지 확인 창 표시 위치: {placeOn.DisplayLabel} ({placeOn.DeviceName}) · " +
+                  "숨기는 모니터와 다른 모니터");
 
-            dispatcher.Invoke(() =>
+            Task<bool> decision = session.WaitAsync(TimeSpan.FromSeconds(timeoutSeconds), ct);
+            try
             {
-                handle = ui.ShowCountdown(timeoutSeconds, placeOn,
-                    onKeep: () => { Interlocked.Exchange(ref keep, 1); answered.Set(); },
-                    onRevert: () => { Interlocked.Exchange(ref keep, 0); answered.Set(); });
-            });
-
-            // The window's own timer only animates; THIS wait is the auto-revert authority.
-            bool gotAnswer = answered.Wait(TimeSpan.FromSeconds(timeoutSeconds + 1), ct);
-
-            dispatcher.Invoke(() => handle?.CloseFromHelper());
-
-            if (!gotAnswer)
-            {
-                _owner._log($"No answer within {timeoutSeconds}s — reverting automatically.");
-                return false;
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (session.IsCompleted) return;
+                    try { handle = ui.ShowCountdown(timeoutSeconds, placeOn, session.Keep, session.Revert); }
+                    catch { session.Revert(); }
+                }));
+                bool keep = decision.GetAwaiter().GetResult();
+                if (!keep) _owner._log("설정 유지를 확인하지 않아 자동으로 복원합니다.");
+                return keep;
             }
-            return Volatile.Read(ref keep) == 1;
+            finally
+            {
+                session.Revert();
+                if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvoke(new Action(() => handle?.CloseFromHelper()));
+            }
         }
 
         private static bool SameDevice(string a, string b)

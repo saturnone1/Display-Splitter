@@ -44,6 +44,8 @@ namespace
         // exe first. Also removed on uninstall (this table drives both).
         { IDR_EDIDOVERRIDE_EXE,  L"edidoverride.exe" },
         { IDR_COMPOSITOR_README, L"compositor-README.md" },
+        { IDR_FONT_LICENSE,      L"NanumSquareRound-LICENSE.txt" },
+        { IDR_FONT_NOTICE,       L"NanumSquareRound-NOTICE.txt" },
     };
 
     const wchar_t kSetupCopyName[] = L"DesktopSplitterSetup.exe";

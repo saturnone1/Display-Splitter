@@ -42,10 +42,9 @@ public static class CompositorLauncher
     public const string FrameDeadlineArgument = "--frame-deadline";
 
     /// <summary>Seconds the compositor waits for the display to become specialized.</summary>
-    public const int WaitForTargetSeconds = 90;
+    public const int WaitForTargetSeconds = -1; // Acquisition or explicit stop, without a forced deadline.
 
     /// <summary>Seconds the compositor allows between acquisition and the first frame.</summary>
-    public const int FrameDeadlineSeconds = 10;
 
     /// <summary>Outcome of waiting for the compositor to confirm specialized presentation.</summary>
     public enum SpecializedWait
@@ -127,19 +126,15 @@ public static class CompositorLauncher
         return false;
     }
 
-    public static bool IsRunning() => GetRunningProcesses().Length > 0;
+    public static bool IsRunning()
+    {
+        var running = GetRunningProcesses();
+        try { return running.Length > 0; }
+        finally { foreach (var process in running) process.Dispose(); }
+    }
 
     public static Process[] GetRunningProcesses()
-    {
-        try
-        {
-            return Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ExecutableName));
-        }
-        catch
-        {
-            return Array.Empty<Process>();
-        }
-    }
+        => Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ExecutableName));
 
     /// <summary>
     /// Waits for the compositor to signal <see cref="SpecializedLiveEventName"/>, while watching
@@ -148,50 +143,26 @@ public static class CompositorLauncher
     /// the code itself is logged.
     /// </summary>
     public static SpecializedWait WaitForSpecializedLive(
-        Process compositor, TimeSpan timeout, CancellationToken ct, Action<string>? log = null)
+        Process compositor, WaitHandle live, TimeSpan timeout, CancellationToken ct, Action<string>? log = null)
     {
-        DateTime deadline = DateTime.UtcNow + timeout;
-        EventWaitHandle? live = null;
+        using var exited = new ProcessExitHandle(compositor);
+        var result = ReadinessWait.Wait(live, exited, timeout, ct);
+        if (result == SpecializedWait.CompositorExited)
+            log?.Invoke($"Compositor exited with code {compositor.ExitCode} before confirming specialized presentation.");
+        return result;
+    }
 
-        try
-        {
-            while (DateTime.UtcNow < deadline)
-            {
-                ct.ThrowIfCancellationRequested();
+    private sealed class ProcessExitHandle : WaitHandle
+    {
+        public ProcessExitHandle(Process process)
+            => SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(process.Handle, ownsHandle: false);
+    }
 
-                if (live is null &&
-                    EventWaitHandle.TryOpenExisting(SpecializedLiveEventName, out EventWaitHandle? opened))
-                {
-                    live = opened;
-                    log?.Invoke($"Opened {SpecializedLiveEventName}.");
-                }
-
-                if (live is not null && live.WaitOne(TimeSpan.Zero)) return SpecializedWait.Live;
-
-                if (compositor.HasExited)
-                {
-                    log?.Invoke($"Compositor exited with code {compositor.ExitCode} before confirming " +
-                                "specialized presentation.");
-                    return SpecializedWait.CompositorExited;
-                }
-
-                Thread.Sleep(100);
-            }
-        }
-        catch (UnauthorizedAccessException)
-        {
-            log?.Invoke($"WARNING: {SpecializedLiveEventName} exists but could not be opened (DACL).");
-        }
-        catch (WaitHandleCannotBeOpenedException)
-        {
-            // Never created — falls through to the timeout result.
-        }
-        finally
-        {
-            live?.Dispose();
-        }
-
-        return SpecializedWait.TimedOut;
+    public static EventWaitHandle PrepareReadinessSignal()
+    {
+        var signal = new EventWaitHandle(false, EventResetMode.ManualReset, SpecializedLiveEventName);
+        signal.Reset();
+        return signal;
     }
 
     /// <summary>Starts the compositor. Throws <see cref="CompositorNotFoundException"/> if missing.</summary>
@@ -244,48 +215,35 @@ public static class CompositorLauncher
     }
 
     /// <summary>
-    /// Signals the stop event and waits for every dscomp.exe to exit.
-    /// Returns true if all processes are gone by the deadline.
+    /// Requests a cooperative stop and observes process exit. Never terminates a process.
     /// </summary>
-    public static bool StopAndWait(TimeSpan timeout, Action<string>? log = null)
+    public static bool StopAndWait(CancellationToken cancellationToken, Action<string>? log = null)
     {
         Process[] running = GetRunningProcesses();
         if (running.Length == 0)
         {
             log?.Invoke("Compositor is not running.");
-            SignalStop();   // harmless; clears a stale signal state for the next run
             return true;
         }
 
-        bool signalled = SignalStop();
-        log?.Invoke(signalled
-            ? $"Signalled {StopEventName}; waiting for the compositor to exit."
-            : $"Could not open {StopEventName}; falling back to WM_CLOSE.");
-
-        if (!signalled)
+        try
         {
-            foreach (Process p in running)
+            return CooperativeShutdown.StopAsync(() =>
             {
-                try { p.CloseMainWindow(); } catch { /* best effort */ }
-            }
-        }
-
-        DateTime deadline = DateTime.UtcNow + timeout;
-        foreach (Process p in running)
-        {
-            try
-            {
-                int remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
-                if (!p.WaitForExit(remaining))
+                if (SignalStop())
                 {
-                    log?.Invoke($"Compositor (pid {p.Id}) did not exit within the timeout — terminating it.");
-                    try { p.Kill(entireProcessTree: true); p.WaitForExit(3000); } catch { /* best effort */ }
+                    log?.Invoke("합성기에 정상 종료를 요청했습니다. 실제 종료를 기다립니다.");
+                    return true;
                 }
-            }
-            catch (InvalidOperationException) { /* already gone */ }
-            finally { p.Dispose(); }
+                bool accepted = true;
+                foreach (Process process in running)
+                    try { accepted &= process.HasExited || process.CloseMainWindow(); }
+                    catch (InvalidOperationException) { /* already exited */ }
+                if (!accepted) log?.Invoke("합성기에 정상 종료를 요청하지 못했습니다. 후속 디스플레이 작업을 중단합니다.");
+                return accepted;
+            }, running.Select<Process, Func<CancellationToken, Task>>(process => token => process.WaitForExitAsync(token)).ToArray(),
+                cancellationToken).GetAwaiter().GetResult();
         }
-
-        return GetRunningProcesses().Length == 0;
+        finally { foreach (Process process in running) process.Dispose(); }
     }
 }

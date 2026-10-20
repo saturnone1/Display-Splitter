@@ -4,7 +4,7 @@ The DesktopSplitter compositor. It captures each virtual monitor with DXGI
 Desktop Duplication and composites them onto the physical monitor, so the user
 sees only the virtual displays.
 
-C++17, Win32, D3D11 + DXGI 1.5. No external dependencies — the JSON parser is
+C++20, Win32, D3D11 + DXGI 1.5. No external dependencies — the JSON parser is
 hand-written and the shaders are compiled at runtime with `D3DCompile`.
 
 ## Build
@@ -66,6 +66,12 @@ other or the render path.
 logs go to stderr (and always to `OutputDebugString`). `2> log.txt` works.
 
 ## Contracts for the control app
+
+The control app passes `--wait-for-target -1` for explicit acquisition without an
+arbitrary deadline. The stop event is available before acquisition begins and
+interrupts its retry wait, so cancellation can request cooperative shutdown even
+before a presentation window exists. `--frame-deadline` remains a black-screen
+safety bound and is supplied from the app's configured confirmation duration.
 
 ### Exit codes
 

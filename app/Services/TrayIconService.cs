@@ -1,6 +1,4 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace DesktopSplitter.Services;
@@ -16,24 +14,31 @@ public sealed class TrayIconService : IDisposable
     private readonly ToolStripMenuItem _applyLastItem;
     private readonly ToolStripMenuItem _revertItem;
     private Icon? _generatedIcon;
-    private IntPtr _generatedIconHandle;
+    private readonly BundledMenuFonts _fonts = new();
     private bool _disposed;
 
     public TrayIconService()
     {
-        _applyLastItem = new ToolStripMenuItem("Apply last configuration");
+        _applyLastItem = new ToolStripMenuItem("마지막 분할 적용");
         _applyLastItem.Click += (_, _) => ApplyLastRequested?.Invoke(this, EventArgs.Empty);
 
-        _revertItem = new ToolStripMenuItem("Revert");
+        _revertItem = new ToolStripMenuItem("원래 화면으로 복원");
         _revertItem.Click += (_, _) => RevertRequested?.Invoke(this, EventArgs.Empty);
 
-        var openItem = new ToolStripMenuItem("Open DesktopSplitter") { Font = new Font(SystemFonts.MenuFont ?? SystemFonts.DefaultFont, FontStyle.Bold) };
+        var openItem = new ToolStripMenuItem("DesktopSplitter 열기");
+        if (_fonts.Bold is not null) openItem.Font = _fonts.Bold;
         openItem.Click += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
 
-        var exitItem = new ToolStripMenuItem("Exit");
+        var exitItem = new ToolStripMenuItem("종료");
         exitItem.Click += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
 
         _menu = new ContextMenuStrip();
+        if (_fonts.Regular is not null) _menu.Font = _fonts.Regular;
+        if (!SystemInformation.HighContrast) {
+            _menu.BackColor = Color.FromArgb(41,44,48);
+            _menu.ForeColor = Color.FromArgb(217,220,225);
+            _menu.Renderer = new ToolStripProfessionalRenderer(new CharcoalMenuColors());
+        }
         _menu.Items.Add(openItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(_applyLastItem);
@@ -77,29 +82,14 @@ public sealed class TrayIconService : IDisposable
         _notifyIcon.ShowBalloonTip(3000);
     }
 
-    /// <summary>Draws a tiny "split monitor" glyph so we do not ship a binary .ico resource.</summary>
+    /// <summary>The same multi-resolution asset is used by the executable and WPF windows.</summary>
     private Icon CreateIcon()
     {
         try
         {
-            using var bmp = new Bitmap(32, 32);
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Transparent);
-
-                using var frame = new Pen(Color.FromArgb(230, 235, 245), 2f);
-                using var left = new SolidBrush(Color.FromArgb(76, 141, 255));
-                using var right = new SolidBrush(Color.FromArgb(120, 200, 160));
-
-                g.FillRectangle(left, 4, 7, 11, 18);
-                g.FillRectangle(right, 17, 7, 11, 18);
-                g.DrawRectangle(frame, 3, 6, 26, 20);
-            }
-
-            _generatedIconHandle = bmp.GetHicon();
-            using var temp = Icon.FromHandle(_generatedIconHandle);
-            _generatedIcon = (Icon)temp.Clone();
+            using var stream = System.Windows.Application.GetResourceStream(new Uri("pack://application:,,,/DesktopSplitter;component/Assets/App.ico")).Stream;
+            using var icon = new Icon(stream, 32, 32);
+            _generatedIcon = (Icon)icon.Clone();
             return _generatedIcon;
         }
         catch
@@ -116,15 +106,25 @@ public sealed class TrayIconService : IDisposable
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _menu.Dispose();
+        _fonts.Dispose();
         _generatedIcon?.Dispose();
-        if (_generatedIconHandle != IntPtr.Zero)
-        {
-            DestroyIcon(_generatedIconHandle);
-            _generatedIconHandle = IntPtr.Zero;
-        }
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DestroyIcon(IntPtr hIcon);
+    private sealed class CharcoalMenuColors : ProfessionalColorTable
+    {
+        private static Color Surface => Color.FromArgb(41,44,48);
+        private static Color Border => Color.FromArgb(72,77,84);
+        private static Color Selected => Color.FromArgb(60,66,73);
+        public override Color ToolStripDropDownBackground => Surface;
+        public override Color ImageMarginGradientBegin => Surface;
+        public override Color ImageMarginGradientMiddle => Surface;
+        public override Color ImageMarginGradientEnd => Surface;
+        public override Color MenuBorder => Border;
+        public override Color MenuItemBorder => Border;
+        public override Color MenuItemSelected => Selected;
+        public override Color MenuItemSelectedGradientBegin => Selected;
+        public override Color MenuItemSelectedGradientEnd => Selected;
+        public override Color SeparatorDark => Border;
+        public override Color SeparatorLight => Surface;
+    }
 }

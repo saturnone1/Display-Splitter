@@ -17,19 +17,6 @@ namespace DesktopSplitter.Services;
 /// </summary>
 public static class SpecializationHashStore
 {
-    /// <summary>
-    /// Hashes captured on known hardware and shipped so those machines work out of the box.
-    /// Keyed by device interface path; only ever matched against that exact string.
-    /// </summary>
-    private static readonly IReadOnlyDictionary<string, ulong> Seeds =
-        new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase)
-        {
-            // Philips 49M2C8900 — captured from a real Settings toggle:
-            //   SystemSettingsAdminFlows.exe SpecializeDisplay 81569 0 260 1 8196125158964431964
-            [@"\\?\DISPLAY#PHLC310#7&224ecef0&0&UID260#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"] =
-                8196125158964431964UL,
-        };
-
     /// <summary>The identity a hash is keyed by. Empty when the monitor has no usable identity.</summary>
     public static string KeyFor(MonitorInfo monitor) => monitor.MonitorDevicePath ?? string.Empty;
 
@@ -49,7 +36,7 @@ public static class SpecializationHashStore
             }
         }
 
-        return Seeds.TryGetValue(key, out ulong seeded) ? seeded : null;
+        return null;
     }
 
     public static bool HasHash(MonitorInfo monitor) => TryGet(monitor) is not null;
@@ -62,15 +49,11 @@ public static class SpecializationHashStore
 
         try
         {
-            AppSettings settings = SettingsStore.Load() ?? new AppSettings();
-            settings.SpecializationHashes ??= new Dictionary<string, string>();
-
-            string? existing = settings.SpecializationHashes.Keys
-                .FirstOrDefault(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
-            if (existing is not null) settings.SpecializationHashes.Remove(existing);
-
-            settings.SpecializationHashes[key] = hash.ToString();
-            SettingsStore.Save(settings);
+            SettingsStore.Update(settings => {
+                foreach (var existing in settings.SpecializationHashes.Keys.Where(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase)).ToArray())
+                    settings.SpecializationHashes.Remove(existing);
+                settings.SpecializationHashes[key] = hash.ToString();
+            });
 
             log?.Report($"Learned the identity hash for {monitor.DisplayLabel}: {hash}. " +
                         "Display hiding can now be turned on and off automatically for this monitor.");
@@ -83,38 +66,4 @@ public static class SpecializationHashStore
         }
     }
 
-    /// <summary>
-    /// Copies any built-in seed that applies to a currently connected monitor into settings.json,
-    /// so the value is visible and editable rather than hidden in the binary.
-    /// </summary>
-    public static void SeedKnownHashes(IEnumerable<MonitorInfo> monitors, IProgress<string>? log = null)
-    {
-        try
-        {
-            AppSettings settings = SettingsStore.Load() ?? new AppSettings();
-            settings.SpecializationHashes ??= new Dictionary<string, string>();
-            bool changed = false;
-
-            foreach (MonitorInfo monitor in monitors)
-            {
-                string key = KeyFor(monitor);
-                if (string.IsNullOrEmpty(key)) continue;
-                if (!Seeds.TryGetValue(key, out ulong seeded)) continue;
-
-                bool present = settings.SpecializationHashes.Keys
-                    .Any(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
-                if (present) continue;
-
-                settings.SpecializationHashes[key] = seeded.ToString();
-                changed = true;
-                log?.Report($"Using the known identity hash for {monitor.DisplayLabel} ({seeded}).");
-            }
-
-            if (changed) SettingsStore.Save(settings);
-        }
-        catch
-        {
-            // Seeding is a convenience; never let it break startup.
-        }
-    }
 }

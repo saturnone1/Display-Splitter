@@ -58,7 +58,7 @@ public sealed class SpecializationCaptureWatcher : IDisposable
     public SpecializeDisplayInvocation? StopAndCollect()
     {
         try { _stop.Cancel(); } catch (ObjectDisposedException) { }
-        try { _thread?.Join(TimeSpan.FromSeconds(2)); } catch { /* best effort */ }
+        _thread?.Join();
         _thread = null;
         return Captured;
     }

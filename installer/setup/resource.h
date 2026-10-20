@@ -12,6 +12,8 @@
 #define IDR_DEVCREATE_EXE       112   // devcreate.exe
 #define IDR_COMPOSITOR_README   113   // compositor-README.md
 #define IDR_EDIDOVERRIDE_EXE    114   // edidoverride.exe (EDID override + guarded transaction)
+#define IDR_FONT_LICENSE        115   // NanumSquareRound-LICENSE.txt
+#define IDR_FONT_NOTICE         116   // NanumSquareRound-NOTICE.txt
 
 // ---- wizard control IDs ---------------------------------------------------
 #define IDC_BTN_BACK               1001

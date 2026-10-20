@@ -21,6 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          dotnet-version: '10.0.x'
+
       # ---------------------------------------------------------------- WDK
       # The runner image ships Visual Studio + Windows SDKs but NOT the WDK,
       # and not the "Windows Driver Kit" VS component that provides the
@@ -72,6 +78,35 @@ jobs:
         id: build
         shell: pwsh
         run: .\build.ps1 -Configuration Release -NoVersionBump
+
+      - name: Check UI resources and safety dialogs without changing displays
+        shell: pwsh
+        run: |
+          dotnet run --project app/tools/ui-smoke/ui-smoke.csproj -c Release -- artifacts/ui-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'UI rendering checks failed' }
+          dotnet run --project app/tools/ui-smoke/ui-smoke.csproj -c Release --no-build -- --state-checks
+          if ($LASTEXITCODE -ne 0) { throw 'Read-only status checks failed' }
+          foreach ($scenario in @('--hiding-ui', '--error-reporter', '--shortcuts', '--appearance', '--stability')) {
+            dotnet run --project app/tools/ui-smoke/ui-smoke.csproj -c Release --no-build -- $scenario
+            if ($LASTEXITCODE -ne 0) { throw "Experimental UI regression check failed: $scenario" }
+          }
+          foreach ($scenario in @('--lifecycle-close', '--lifecycle-exit', '--lifecycle-preview', '--lifecycle-manual')) {
+            dotnet run --project app/tools/ui-smoke/ui-smoke.csproj -c Release --no-build -- $scenario
+            if ($LASTEXITCODE -ne 0) { throw "UI lifecycle check failed: $scenario" }
+          }
+
+      - name: Check native compatibility without acquiring displays
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
+          foreach ($probe in @('GeometryProbe', 'PresenterProbe')) {
+            & $msbuild "compositor\tests\$probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /v:m /nologo
+            if ($LASTEXITCODE -ne 0) { throw "$probe build failed" }
+            & "compositor\build\x64\Release\$probe.exe"
+            if ($LASTEXITCODE -ne 0) { throw "$probe failed" }
+          }
+          .\tools\check-native-dependencies.ps1
 
       # -------------------------------------------------------------- check
       # CI runners execute elevated, so the shipping exe can run directly.

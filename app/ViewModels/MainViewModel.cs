@@ -15,6 +15,55 @@ public sealed class MainViewModel : ObservableObject
 
     private readonly IProgress<string> _progress;
     private readonly object _statusLock = new();
+    private readonly StatusLog _statusLog = new();
+    private readonly LatestRefresh<DesktopSnapshot> _refresh;
+    private readonly System.Windows.Threading.Dispatcher? _dispatcher = System.Windows.Application.Current?.Dispatcher;
+    private readonly IDesktopActions _desktopActions;
+    private int _liveSelectedSlot;
+    public ObservableCollection<string> CurrentSlots { get; } = new();
+    private readonly CancellationTokenSource _lifetime = new();
+    private bool _initialized;
+    private bool _liveSplit;
+    private bool _hasDesktopStatus;
+    private string? _preferredMonitorPath;
+    private string? _preferredMonitorDevice;
+    private bool _selectionPending;
+    private bool _isSplitEditorExpanded;
+    public bool IsSplitEditorExpanded { get => _isSplitEditorExpanded; set => SetProperty(ref _isSplitEditorExpanded, value); }
+    public bool IsOriginalScreen => _hasDesktopStatus && !_liveSplit;
+    public string OriginalScreenText => SelectedMonitor is null ? "원본 모니터를 확인할 수 없습니다."
+        : $"{SelectedMonitor.DisplayLabel}\n{SelectedMonitor.CurrentWidth} × {SelectedMonitor.CurrentHeight}\n원본 화면";
+    private string _livePhysicalPath = "";
+    private LayoutKind _liveLayout;
+    private bool MatchesActiveMatrix => _liveSplit && SelectedMonitor is not null && SelectedLayout is not null
+        && !string.IsNullOrWhiteSpace(_livePhysicalPath) && string.Equals(_livePhysicalPath, SelectedMonitor.MonitorDevicePath, StringComparison.OrdinalIgnoreCase)
+        && _liveLayout == SelectedLayout.Kind;
+    private int _primarySlot = 1;
+    private bool _rememberMatrixWindows = true;
+    public bool IsActiveMatrix => MatchesActiveMatrix;
+    public string DisplayStateText => !_hasDesktopStatus ? "현재 화면 상태 확인 중"
+        : _liveSplit ? "현재 상태: 분할 화면 실행 중" : "현재 상태: 원본 화면 · 분할 없음";
+    public string MatrixStateText => MatchesActiveMatrix ? "칸을 고른 뒤 ‘현재 그룹에 지정’을 눌러 확정하세요. 단축키는 바로 지정합니다."
+        : !_hasDesktopStatus ? "화면 상태를 확인하고 있습니다."
+        : !_liveSplit ? "원본 화면에는 선택 칸이 없습니다. 이전 선택 칸은 재분할할 때 사용합니다."
+        : "선택한 모니터·분할 방식은 실행 중인 그룹과 다릅니다.";
+    public IEnumerable<int> PrimaryChoices => MatchesActiveMatrix
+        ? Enumerable.Range(1, SelectedLayout?.SegmentCount ?? 1) : Enumerable.Empty<int>();
+    public int SelectedPrimarySlot {
+        get => _primarySlot;
+        set {
+            if (value < 1 || value > (SelectedLayout?.SegmentCount ?? 1)) return;
+            if (!SetProperty(ref _primarySlot, value)) return;
+            _selectionPending = value != _liveSelectedSlot;
+        }
+    }
+    public bool RememberMatrixWindows {
+        get => _rememberMatrixWindows;
+        set { if (SetProperty(ref _rememberMatrixWindows, value)) PersistPreferences(); }
+    }
+    private bool _closing;
+    private bool _statusNotificationQueued;
+    private readonly FileStatusLog? _fileLog;
 
     private MonitorInfo? _selectedMonitor;
     private LayoutDefinition? _selectedLayout;
@@ -27,9 +76,13 @@ public sealed class MainViewModel : ObservableObject
     private double _canvasWidth = MaxCanvasWidth;
     private double _canvasHeight = 200;
     private bool _isBusy;
+    private DisplayOperationState _operationState;
+    public DisplayOperationState OperationState { get => _operationState; private set => SetProperty(ref _operationState, value); }
     private bool _suppressSegmentRebuild;
     private IApplyConfirmer? _applyConfirmer;
     private SplitSuspensionWatcher? _suspensionWatcher;
+    private CancellationTokenSource? _operationCancellation;
+    private TaskCompletionSource? _operationFinished;
 
     /// <summary>Set while the VM itself is writing segment sizes, to stop feedback loops.</summary>
     private bool _editorSuspended;
@@ -39,43 +92,96 @@ public sealed class MainViewModel : ObservableObject
     private int[] _dragTracks = Array.Empty<int>();
     private double _dragGrabOffset;
 
-    public MainViewModel()
+    public bool IsUiPreview { get; }
+    public bool IsManualReview { get; }
+    private bool SuppressAutomaticDisplayChanges => IsUiPreview || IsManualReview;
+
+    public MainViewModel(bool previewOnly = false, bool manualReview = false, Func<DesktopSnapshot>? statusReader = null, IDesktopActions? desktopActions = null)
     {
+        _desktopActions = desktopActions ?? new DesktopActions();
+        IsUiPreview = previewOnly;
+        IsManualReview = manualReview;
+        if (!previewOnly && System.Windows.Application.Current is not DesktopSplitter.App { IsDiagnosticHost: true })
+            _fileLog = new FileStatusLog(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DesktopSplitter", "logs"));
         // Constructed on the UI thread: Progress<T> captures the dispatcher context.
         _progress = new Progress<string>(AppendStatus);
+        Shortcuts = new ShortcutSettingsViewModel(AppendStatus, previewOnly);
 
         Layouts = new ObservableCollection<LayoutDefinition>(LayoutDefinition.All);
         Monitors = new ObservableCollection<MonitorInfo>();
         Segments = new ObservableCollection<SegmentViewModel>();
         Zones = new ObservableCollection<ZoneVisual>();
         Splitters = new ObservableCollection<SplitterVisual>();
+        Hiding = new HidingViewModel(() => SelectedMonitor, AppendStatus, previewOnly);
+        _refresh = new LatestRefresh<DesktopSnapshot>(() => Task.Run(statusReader ?? DesktopStatusReader.Read).WaitAsync(_lifetime.Token), snapshot => {
+            if (_closing) return;
+            if (IsBusy) return; // Every display operation awaits a fresh snapshot after unlocking.
+            bool wasSplit = _liveSplit;
+            bool firstStatus = !_hasDesktopStatus;
+            _hasDesktopStatus = true;
+            _liveSplit = snapshot.ActiveVirtualCount > 0;
+            if (firstStatus || wasSplit != _liveSplit) IsSplitEditorExpanded = _liveSplit;
+            bool sameGroup = wasSplit && _liveSplit && _liveLayout == snapshot.ActiveGroupLayout
+                && string.Equals(_livePhysicalPath, snapshot.ActiveGroupPath, StringComparison.OrdinalIgnoreCase);
+            _livePhysicalPath = _liveSplit ? snapshot.ActiveGroupPath : "";
+            _liveLayout = snapshot.ActiveGroupLayout;
+            _liveSelectedSlot = snapshot.SelectedSlot;
+            if (!sameGroup || _primarySlot == _liveSelectedSlot) _selectionPending = false;
+            var rows = ((_liveSplit ? snapshot.ActiveTargets : null) ?? Array.Empty<SplitTarget>())
+                .Select(target => $"칸 {target.Number} ← 화면 {target.SourceNumber} · {target.Bounds.Width} × {target.Bounds.Height}"
+                    + (target.Number == _liveSelectedSlot ? " · 선택됨" : "")).ToList();
+            if (_liveSplit && !string.IsNullOrEmpty(snapshot.RoutingIssue)) rows.Add(snapshot.RoutingIssue);
+            SnapshotCollection.Update(CurrentSlots, rows);
+            ApplyMonitorSnapshot(snapshot.Monitors, announce: false);
+            DriverStatus = snapshot.DriverStatus;
+            CompositorStatus = snapshot.CompositorStatus;
+            NotifyMatrixState();
+            SetPrimaryCommand?.RaiseCanExecuteChanged();
+        });
 
-        RefreshMonitorsCommand = new RelayCommand(() => LoadMonitors(announce: true), () => !IsBusy);
+        RefreshMonitorsCommand = new RelayCommand(async () =>
+        {
+            await RefreshMonitorsAsync(announce: true);
+            if (!_closing) await Hiding.RefreshAsync();
+        }, () => _initialized && !IsBusy && !_closing);
         ResetSegmentsCommand = new RelayCommand(() => RebuildSegments(resetSizes: true),
                                                 () => !IsBusy && SelectedLayout is not null);
         ApplyCommand = new RelayCommand(async () => await ApplyAsync().ConfigureAwait(false), () => CanApply);
-        RevertCommand = new RelayCommand(async () => await RevertAsync().ConfigureAwait(false), () => !IsBusy);
-        MinimizeToTrayCommand = new RelayCommand(() => MinimizeToTrayRequested?.Invoke(this, EventArgs.Empty));
+        RevertCommand = new RelayCommand(async () => await RevertAsync().ConfigureAwait(false), () => _initialized && !_closing && !IsUiPreview && !IsBusy);
+        CancelOperationCommand = new RelayCommand(CancelPendingOperations, () => _operationCancellation is { IsCancellationRequested: false });
+        SetPrimaryCommand = new RelayCommand(async () => await SetPrimaryAsync(SelectedPrimarySlot), () => _initialized && !_closing && !IsBusy && !IsUiPreview && MatchesActiveMatrix);
+        MinimizeToTrayCommand = new RelayCommand(() => MinimizeToTrayRequested?.Invoke(this, EventArgs.Empty), () => !IsUiPreview);
 
         _selectedLayout = Layouts[0];
 
-        Hiding = new HidingViewModel(() => SelectedMonitor, AppendStatus);
+        AppendStatus(IsUiPreview ? "UI 미리 보기: 디스플레이 변경·복구·시작 프로그램 등록·설정 저장을 하지 않습니다." : "준비되었습니다.");
+        if (IsManualReview) AppendStatus("수동 검토 모드: 버튼을 사용할 수 있습니다. 자동 적용·복구·종료 시 자동 복원은 실행하지 않습니다.");
 
-        LoadMonitors(announce: false);
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        Initialization = dispatcher is null ? InitializeAsync()
+            : dispatcher.InvokeAsync(InitializeAsync).Task.Unwrap();
+    }
+
+    public Task Initialization { get; }
+
+    private async Task InitializeAsync()
+    {
+        if (_closing) return;
+        await RefreshMonitorsAsync(false);
+        if (_closing) return;
         RestoreSettings();
-        RefreshDriverStatus();
-        RefreshCompositorStatus();
-
-        AppendStatus("Ready.");
-
-        // If a previous session died while the physical monitor was hidden, put it back.
-        _ = RecoverThenRefreshAsync();
+        if (!SuppressAutomaticDisplayChanges) await RecoverThenRefreshAsync();
+        else _ = Hiding.RefreshAsync();
+        if (_closing) return;
+        _initialized = true;
+        RaiseCommandStates();
     }
 
     // ------------------------------------------------------------------ bound state
 
     /// <summary>The "Display hiding (experimental)" panel.</summary>
     public HidingViewModel Hiding { get; }
+    public ShortcutSettingsViewModel Shortcuts { get; }
 
     /// <summary>Informational assembly version, produced by the shared versioning build step.</summary>
     public static string VersionText { get; } = ReadVersion();
@@ -139,6 +245,18 @@ public sealed class MainViewModel : ObservableObject
 
     private bool _startWithWindows;
     private bool _applyOnStartup;
+    private int _safetyConfirmationSeconds = AppSettings.DefaultSafetyConfirmationSeconds;
+
+    public int SafetyConfirmationSeconds
+    {
+        get => _safetyConfirmationSeconds;
+        set
+        {
+            if (value <= 0 || TimeSpan.FromSeconds(value).TotalMilliseconds >= uint.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(value), "안전 복원 시간은 양수이며 타이머 지원 범위 안이어야 합니다.");
+            if (SetProperty(ref _safetyConfirmationSeconds, value)) PersistPreferences();
+        }
+    }
 
     /// <summary>Backed by the HKCU Run key, which is read live so external changes show up.</summary>
     public bool StartWithWindows
@@ -146,6 +264,7 @@ public sealed class MainViewModel : ObservableObject
         get => _startWithWindows;
         set
         {
+            if (IsUiPreview) return;
             if (!SetProperty(ref _startWithWindows, value)) return;
             StartupRegistration.Set(value, _progress);
             PersistPreferences();
@@ -161,6 +280,7 @@ public sealed class MainViewModel : ObservableObject
         get => _applyOnStartup;
         set
         {
+            if (IsUiPreview) return;
             if (!SetProperty(ref _applyOnStartup, value)) return;
             PersistPreferences();
         }
@@ -169,25 +289,35 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Reads preference state from the registry and settings file.</summary>
     public void LoadPreferences()
     {
-        StartupRegistration.RefreshIfStale(_progress);
+        if (!SuppressAutomaticDisplayChanges) StartupRegistration.RefreshIfStale(_progress);
         _startWithWindows = StartupRegistration.IsEnabled();
-        _applyOnStartup = SettingsStore.Load()?.ApplyOnStartup ?? false;
+        var preferences = SettingsStore.Load();
+        _applyOnStartup = preferences?.ApplyOnStartup ?? false;
+        int seconds = preferences?.SafetyConfirmationSeconds ?? AppSettings.DefaultSafetyConfirmationSeconds;
+        _rememberMatrixWindows = preferences?.RememberMatrixWindows ?? true;
+        _safetyConfirmationSeconds = seconds > 0 && TimeSpan.FromSeconds(seconds).TotalMilliseconds < uint.MaxValue
+            ? seconds : AppSettings.DefaultSafetyConfirmationSeconds;
         OnPropertyChanged(nameof(StartWithWindows));
         OnPropertyChanged(nameof(ApplyOnStartup));
+        OnPropertyChanged(nameof(SafetyConfirmationSeconds));
+        OnPropertyChanged(nameof(RememberMatrixWindows));
     }
 
     private void PersistPreferences()
     {
+        if (IsUiPreview || System.Windows.Application.Current is DesktopSplitter.App { IsDiagnosticHost: true }) return;
         try
         {
-            AppSettings settings = SettingsStore.Load() ?? new AppSettings();
-            settings.StartWithWindows = _startWithWindows;
-            settings.ApplyOnStartup = _applyOnStartup;
-            SettingsStore.Save(settings);
+            SettingsStore.Update(settings => {
+                settings.StartWithWindows = _startWithWindows;
+                settings.ApplyOnStartup = _applyOnStartup;
+                settings.SafetyConfirmationSeconds = _safetyConfirmationSeconds;
+                settings.RememberMatrixWindows = _rememberMatrixWindows;
+            });
         }
         catch (Exception ex)
         {
-            AppendStatus("Could not save preferences: " + ex.Message);
+            AppendStatus("설정을 저장하지 못했습니다: " + ex.Message);
         }
     }
 
@@ -197,54 +327,65 @@ public sealed class MainViewModel : ObservableObject
     /// Re-applies the saved configuration if it was live when we last exited, or if the user
     /// asked for auto-apply. Never prompts — this is not a user-initiated change.
     /// </summary>
-    public async Task AutoApplyOnStartupAsync()
+    public Task AutoApplyOnStartupAsync() => DesktopUiThread.RunAsync(_dispatcher, AutoApplyOnStartupCoreAsync);
+    private async Task AutoApplyOnStartupCoreAsync()
     {
+        if (SuppressAutomaticDisplayChanges) return;
+        await Initialization;
+        if (_closing) return;
         AppSettings? settings = SettingsStore.Load();
         bool splitActive = await Task.Run(HidingStatus.IsSplitActive).ConfigureAwait(true);
 
         if (!ApplyService.ShouldAutoApplyOnStartup(settings, splitActive)) return;
         if (!RestoreSettings(settings))
         {
-            AppendStatus("Skipping auto-apply: the saved monitor is not connected.");
+            AppendStatus("자동 적용을 건너뜁니다. 저장된 모니터가 연결되어 있지 않습니다.");
             return;
         }
 
-        AppendStatus("--- Re-applying the saved configuration (no confirmation at startup) ---");
+        AppendStatus("--- 저장된 분할 설정 자동 적용 ---");
         await ApplyAsync(promptToConfirm: false).ConfigureAwait(true);
     }
 
     /// <summary>
     /// Tears the split down on exit so the desktop is never left split with nothing driving it.
-    /// Best effort and time-bounded: it must not hang logoff or shutdown.
+    /// Runs asynchronously and observes actual completion; OS shutdown never blocks on this path.
     /// </summary>
-    public void RevertOnExit()
+    public Task RevertOnExitAsync() => DesktopUiThread.RunAsync(_dispatcher, RevertOnExitCoreAsync);
+    private async Task RevertOnExitCoreAsync()
     {
+        _closing = true;
+        _lifetime.Cancel();
+        CancelPendingOperations();
+        Hiding.CancelRefresh();
+        if (_operationFinished is not null) await _operationFinished.Task.ConfigureAwait(true);
+        if (_suspensionWatcher is not null)
+            await Task.Run(() => StopSuspensionWatcher(restorePrimary: false)).ConfigureAwait(true);
+        if (SuppressAutomaticDisplayChanges) { if (_fileLog is not null) await _fileLog.DisposeAsync(); return; }
+        await Initialization;
         try
         {
-            StopSuspensionWatcher(restorePrimary: false);
-
-            if (!HidingStatus.IsSplitActive())
+            if (!await Task.Run(HidingStatus.IsSplitActive).ConfigureAwait(true))
             {
                 ApplyService.MarkSplitInactive(deliberate: false);
                 return;
             }
 
             var log = new Progress<string>(_ => { });
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            ApplyService.Revert(log, cts.Token);
+            await Task.Run(() => ApplyService.Revert(log, CancellationToken.None, deliberate: false)).ConfigureAwait(true);
 
             // Exiting is not a deliberate revert: the configuration should come back next launch.
             AppSettings? settings = SettingsStore.Load();
             if (settings is not null)
             {
-                settings.SplitActiveOnExit = true;
-                SettingsStore.Save(settings);
+                SettingsStore.Update(current => current.SplitActiveOnExit = true);
             }
         }
         catch
         {
             // Shutdown must proceed regardless.
         }
+        finally { if (_fileLog is not null) await _fileLog.DisposeAsync(); }
     }
 
     public ObservableCollection<MonitorInfo> Monitors { get; }
@@ -262,7 +403,15 @@ public sealed class MainViewModel : ObservableObject
         get => _selectedMonitor;
         set
         {
+            // Collection refresh temporarily clears WPF's two-way SelectedItem. This is
+            // not a user choice and must not rebuild segment sizes using a missing monitor.
+            if (_suppressSegmentRebuild) return;
             if (!SetProperty(ref _selectedMonitor, value)) return;
+            if (value is not null) {
+                _preferredMonitorPath = value.MonitorDevicePath;
+                _preferredMonitorDevice = value.DeviceName;
+            }
+            _selectionPending = false;
             UpdateModeTexts();
             RebuildSegments(resetSizes: true);
             RaiseCommandStates();
@@ -276,6 +425,8 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedLayout, value)) return;
+            _selectionPending = false;
+            IsSplitEditorExpanded = true; // An explicit preset choice opens its draft editor.
             RebuildSegments(resetSizes: true);
             RaiseCommandStates();
         }
@@ -355,7 +506,7 @@ public sealed class MainViewModel : ObservableObject
     public bool IsIdle => !_isBusy;
 
     public bool CanApply =>
-        !IsBusy &&
+        _initialized && !_closing && !IsUiPreview && !IsBusy &&
         SelectedMonitor is not null &&
         SelectedLayout is not null &&
         Segments.Count == SelectedLayout.SegmentCount &&
@@ -367,6 +518,8 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand ResetSegmentsCommand { get; }
     public RelayCommand ApplyCommand { get; }
     public RelayCommand RevertCommand { get; }
+    public RelayCommand CancelOperationCommand { get; }
+    public RelayCommand SetPrimaryCommand { get; }
     public RelayCommand MinimizeToTrayCommand { get; }
 
     public event EventHandler? MinimizeToTrayRequested;
@@ -382,14 +535,14 @@ public sealed class MainViewModel : ObservableObject
         {
             await Task.Run(() =>
             {
-                SpecializationHashStore.SeedKnownHashes(Monitors.ToList(), _progress);
-                ApplyService.RecoverStaleSpecialization(_progress);
+                ApplyService.RecoverStaleSpecialization(_progress, _lifetime.Token);
             }).ConfigureAwait(true);
-            await Hiding.RefreshAsync().ConfigureAwait(true);
+            if (!_closing) _ = Hiding.RefreshAsync();
         }
+        catch (OperationCanceledException) when (_closing) { }
         catch (Exception ex)
         {
-            AppendStatus("Display-hiding recovery check failed: " + ex.Message);
+            AppendStatus("모니터 숨김 복구 확인 실패: " + ex.Message);
         }
     }
 
@@ -398,46 +551,64 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Called from the WM_DISPLAYCHANGE hook; keeps the user's edits.</summary>
     public void OnDisplayChanged()
     {
-        LoadMonitors(announce: false);
-        UpdateModeTexts();
-        AppendStatus("Display configuration changed — monitor list refreshed.");
+        if (_closing) return;
+        if (IsBusy) return; // The operation's completion path performs the final read.
+        _ = RefreshAfterDisplayChangeAsync();
     }
 
-    public void LoadMonitors(bool announce)
+    private async Task RefreshAfterDisplayChangeAsync()
     {
-        string? previous = SelectedMonitor?.DeviceName;
+        await RefreshMonitorsAsync(false);
+        if (!_closing && !IsBusy) await Hiding.RefreshAsync();
+    }
+
+    public Task RefreshMonitorsAsync(bool announce = false) => DesktopUiThread.RunAsync(_dispatcher, () => RefreshMonitorsCoreAsync(announce));
+    private async Task RefreshMonitorsCoreAsync(bool announce)
+    {
+        if (_closing) return;
+        try {
+            await _refresh.RequestAsync();
+            if (announce && !_closing) AppendStatus($"모니터 {Monitors.Count}대를 찾았습니다.");
+        } catch (Exception error) { if (!_closing) AppendStatus("모니터 목록을 읽지 못했습니다: " + error.Message); }
+    }
+
+    private void ApplyMonitorSnapshot(IReadOnlyList<MonitorInfo> physical, bool announce)
+    {
+        var previousMonitor = SelectedMonitor;
+        string? previous = _preferredMonitorDevice ?? previousMonitor?.DeviceName;
+        string? previousPath = _preferredMonitorPath ?? previousMonitor?.MonitorDevicePath;
+        bool hasPreference = !string.IsNullOrWhiteSpace(previousPath) || !string.IsNullOrWhiteSpace(previous);
         try
         {
-            IReadOnlyList<MonitorInfo> physical = DisplayConfig.EnumeratePhysical();
-
-            Monitors.Clear();
-            foreach (MonitorInfo m in physical) Monitors.Add(m);
-
             _suppressSegmentRebuild = true;
             try
             {
-                _selectedMonitor = Monitors.FirstOrDefault(
-                                       m => string.Equals(m.DeviceName, previous, StringComparison.OrdinalIgnoreCase))
-                                   ?? Monitors.FirstOrDefault(m => m.IsPrimary)
-                                   ?? Monitors.FirstOrDefault();
+                SnapshotCollection.Update(Monitors, physical);
+                _selectedMonitor = hasPreference ? MonitorSelection.Find(Monitors, previousPath, previous)
+                    : Monitors.FirstOrDefault(m => m.IsPrimary) ?? Monitors.FirstOrDefault();
+                if (_selectedMonitor is not null) {
+                    _preferredMonitorPath = _selectedMonitor.MonitorDevicePath;
+                    _preferredMonitorDevice = _selectedMonitor.DeviceName;
+                }
             }
             finally { _suppressSegmentRebuild = false; }
 
-            OnPropertyChanged(nameof(SelectedMonitor));
+            if (!ReferenceEquals(previousMonitor, _selectedMonitor)) OnPropertyChanged(nameof(SelectedMonitor));
             UpdateModeTexts();
 
             // Preserve the user's edited sizes across a plain rescan of the same monitor.
-            bool sameSelection = previous is not null &&
-                                 string.Equals(_selectedMonitor?.DeviceName, previous, StringComparison.OrdinalIgnoreCase);
+            bool sameSelection = !string.IsNullOrWhiteSpace(previousPath)
+                ? string.Equals(_selectedMonitor?.MonitorDevicePath, previousPath, StringComparison.OrdinalIgnoreCase)
+                : previous is not null && string.Equals(_selectedMonitor?.DeviceName, previous, StringComparison.OrdinalIgnoreCase);
             bool countMatches = SelectedLayout is not null && Segments.Count == SelectedLayout.SegmentCount;
-            RebuildSegments(resetSizes: !(sameSelection && countMatches));
+            RebuildSegments(resetSizes: !((sameSelection || (hasPreference && _selectedMonitor is null)) && countMatches));
 
             if (announce)
-                AppendStatus($"Found {Monitors.Count} physical monitor(s).");
+                AppendStatus($"모니터 {Monitors.Count}대를 찾았습니다.");
         }
         catch (Exception ex)
         {
-            AppendStatus("Monitor enumeration failed: " + ex.Message);
+            AppendStatus("모니터 목록을 읽지 못했습니다: " + ex.Message);
         }
         RaiseCommandStates();
     }
@@ -453,7 +624,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         CurrentModeText = m.CurrentModeText;
-        RefreshText = $"{m.MaxRefreshHz} Hz  ({m.MaxRefreshMillihertz} mHz)  — native {m.MaxWidth}x{m.MaxHeight}";
+        RefreshText = $"{m.MaxRefreshHz} Hz · 최대 해상도 {m.MaxWidth}x{m.MaxHeight}";
     }
 
     // ------------------------------------------------------------------ segments + editor
@@ -474,23 +645,26 @@ public sealed class MainViewModel : ObservableObject
         int monW = monitor?.CurrentWidth ?? 1920;
         int monH = monitor?.CurrentHeight ?? 1080;
 
-        var previous = Segments.Select(s => (s.Width, s.Height)).ToList();
-        bool reuse = !resetSizes && previous.Count == layout.SegmentCount;
+        bool reuse = !resetSizes && Segments.Count == layout.SegmentCount;
 
         // Per-layout defaults: most layouts subdivide equally, the 16:9-centre preset computes
         // a true 16:9 middle segment instead.
-        IReadOnlyList<(int Width, int Height)> defaults = layout.ComputeDefaultSegmentSizes(monW, monH);
-
-        foreach (SegmentViewModel old in Segments) old.Changed -= OnSegmentChanged;
-        Segments.Clear();
-
-        for (int i = 0; i < layout.SegmentCount; i++)
-        {
-            (int w, int h) = reuse ? previous[i] : defaults[i];
-            var vm = new SegmentViewModel(i, w, h);
-            vm.Changed += OnSegmentChanged;
-            Segments.Add(vm);
+        if (!reuse) {
+            IReadOnlyList<(int Width, int Height)> defaults = layout.ComputeDefaultSegmentSizes(monW, monH);
+            foreach (SegmentViewModel old in Segments) old.Changed -= OnSegmentChanged;
+            Segments.Clear();
+            for (int i = 0; i < layout.SegmentCount; i++) {
+                (int w, int h) = defaults[i];
+                var vm = new SegmentViewModel(i, w, h);
+                vm.Changed += OnSegmentChanged;
+                Segments.Add(vm);
+            }
         }
+        if (!_selectionPending && MatchesActiveMatrix && _liveSelectedSlot >= 1 && _liveSelectedSlot <= layout.SegmentCount)
+            _primarySlot = _liveSelectedSlot;
+        else if (!reuse)
+            _primarySlot = SplitPrimarySelector.ReadChoice(SettingsStore.Load(), monitor?.MonitorDevicePath ?? "", layout.Kind, layout.SegmentCount);
+        NotifyMatrixState();
 
         RebuildEditor();
         RaiseCommandStates();
@@ -538,6 +712,7 @@ public sealed class MainViewModel : ObservableObject
         for (int i = 0; i < layout.SegmentCount; i++)
         {
             ZoneVisual z = Zones[i];
+            z.IsPrimary = MatchesActiveMatrix && z.Number == _liveSelectedSlot;
             z.X = rects[i].X;
             z.Y = rects[i].Y;
             z.W = rects[i].W;
@@ -624,12 +799,12 @@ public sealed class MainViewModel : ObservableObject
         int sumH = tracks.RowHeights.Sum();
 
         var parts = new List<string>(2);
-        if (sumW != monW) parts.Add($"widths sum to {sumW} px (monitor is {monW})");
-        if (sumH != monH) parts.Add($"heights sum to {sumH} px (monitor is {monH})");
+        if (sumW != monW) parts.Add($"가로 합계 {sumW}px / 모니터 {monW}px");
+        if (sumH != monH) parts.Add($"세로 합계 {sumH}px / 모니터 {monH}px");
 
         SumNote = parts.Count == 0
             ? string.Empty
-            : string.Join("; ", parts) + " — segments will be scaled into their on-screen rects.";
+            : string.Join("; ", parts) + " · 실제 배치 영역에 맞춰 화면 크기가 조정됩니다.";
     }
 
     // ------------------------------------------------------------------ splitter dragging
@@ -753,114 +928,184 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>User-initiated apply — always confirmed with the keep-or-revert countdown.</summary>
     public Task ApplyAsync() => ApplyAsync(promptToConfirm: true);
 
-    public async Task ApplyAsync(bool promptToConfirm)
+    public Task ApplyAsync(bool promptToConfirm) => DesktopUiThread.RunAsync(_dispatcher, () => ApplyCoreAsync(promptToConfirm));
+    private async Task ApplyCoreAsync(bool promptToConfirm)
     {
         if (!CanApply) return;
-
+        // The background pipeline performs read-only preflight before any mutation.
         MonitorInfo physical = SelectedMonitor!;
         LayoutDefinition layout = SelectedLayout!;
         var resolutions = Segments.Select(s => (s.Width, s.Height)).ToList();
 
+        using var cancellation = BeginOperation(DisplayOperationState.Applying);
+        var state = new Progress<DisplayOperationState>(value => {
+            if (ReferenceEquals(_operationCancellation, cancellation)) OperationState = value;
+        });
         var request = new ApplyRequest
         {
             Physical = physical,
             Layout = layout,
             Resolutions = resolutions,
+            PrimarySlot = SelectedPrimarySlot,
             HidePhysicalDisplay = Hiding.IntentOn,
             SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.ToList()),
             PromptToConfirm = promptToConfirm,
             Confirmer = _applyConfirmer,
+            ConfirmationSeconds = SafetyConfirmationSeconds,
+            State = state,
         };
 
         IsBusy = true;
-        AppendStatus($"--- Applying '{layout.Name}' to {physical.DisplayLabel} ({physical.DeviceName}) ---");
+        AppendStatus($"--- {physical.DisplayLabel}에 {layout.Name} 적용 ({physical.DeviceName}) ---");
         try
         {
-            ApplyResult result = await Task.Run(() => ApplyService.Apply(request, _progress, CancellationToken.None))
+            ApplyResult result = await Task.Run(() => {
+                using var operation = ApplyService.UserOperationGate.Enter(cancellation.Token);
+                ApplyService.CheckPrerequisites();
+                MatrixSnapshot? prior = promptToConfirm ? SplitMatrixWorkspace.Capture(_progress) : null;
+                var restore = promptToConfirm ? SplitMatrixWorkspace.PrepareRestore(physical.MonitorDevicePath, layout.Kind, _progress) : null;
+                var applied = ApplyService.Apply(request, _progress, cancellation.Token);
+                if (promptToConfirm && !applied.RolledBack)
+                    SplitMatrixWorkspace.RestoreSplit(restore, request.PrimarySlot, _progress, cancellation.Token);
+                else if (applied.RolledBack && prior is not null)
+                    SplitMatrixWorkspace.RestoreSplit(new MatrixRestorePlan(prior, prior.Windows.Select(window => window.Identity).ToHashSet()), prior.PrimarySlot, _progress, cancellation.Token);
+                return applied;
+            })
                                            .ConfigureAwait(true);
             AppendStatus(result.RolledBack
-                ? $"Change reverted — restored {result.RollbackDescription}."
-                : $"Done. {result.VirtualMonitors.Count} virtual monitor(s) active.");
+                ? $"변경을 취소하고 {result.RollbackDescription}(으)로 복원했습니다."
+                : $"분할 적용 완료: 가상 모니터 {result.VirtualMonitors.Count}개가 실행 중입니다.");
+            OperationState = DisplayOperationState.Completed;
 
             if (!result.RolledBack) StartSuspensionWatcher();
         }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            OperationState = DisplayOperationState.Cancelled;
+            AppendStatus("적용 대기를 취소했습니다. 현재 상태를 확인한 뒤 필요하면 ‘원래 화면으로 복원’을 눌러 주세요.");
+        }
         catch (ApplyException ex)
         {
-            AppendStatus("Apply failed: " + ex.Message);
+            AppendStatus("분할 적용 실패: " + ex.Message);
         }
         catch (DriverNotFoundException ex)
         {
-            AppendStatus("Apply failed: " + ex.Message);
+            AppendStatus("분할 적용 실패: " + ex.Message);
         }
         catch (DriverIoException ex)
         {
-            AppendStatus("Apply failed: " + ex.Message);
+            AppendStatus("분할 적용 실패: " + ex.Message);
         }
         catch (DisplayArrangeException ex)
         {
-            AppendStatus("Apply failed: " + ex.Message);
+            AppendStatus("분할 적용 실패: " + ex.Message);
         }
         catch (CompositorNotFoundException ex)
         {
-            AppendStatus("Apply failed: " + ex.Message);
+            AppendStatus("분할 적용 실패: " + ex.Message);
         }
         catch (Exception ex)
         {
-            AppendStatus("Apply failed (unexpected): " + ex.Message);
+            AppendStatus("예상하지 못한 적용 오류: " + ex.Message);
         }
         finally
         {
-            IsBusy = false;
-            LoadMonitors(announce: false);
-            RefreshDriverStatus();
-            RefreshCompositorStatus();
-            _ = Hiding.RefreshAsync();
+            await FinishOperationAsync(refreshHiding: true);
         }
     }
 
-    public async Task RevertAsync()
+    public Task RevertAsync() => DesktopUiThread.RunAsync(_dispatcher, RevertCoreAsync);
+    private async Task RevertCoreAsync()
     {
+        if (IsUiPreview || IsBusy || _closing || !_initialized) return;
+        using var cancellation = BeginOperation(DisplayOperationState.Reverting);
         IsBusy = true;
-        AppendStatus("--- Reverting ---");
+        AppendStatus("--- 원래 화면으로 복원 ---");
 
         // Drop any pending suspend state first: Revert restores primary itself, and a watcher
         // still reacting to events would fight it.
-        StopSuspensionWatcher(restorePrimary: false);
-
         try
         {
-            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None)).ConfigureAwait(true);
+            await Task.Run(() => {
+                using var operation = ApplyService.UserOperationGate.Enter(cancellation.Token);
+                StopSuspensionWatcher(restorePrimary: false);
+                _desktopActions.Revert(_progress, cancellation.Token);
+            }).ConfigureAwait(true);
+            OperationState = DisplayOperationState.Completed;
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            OperationState = DisplayOperationState.Cancelled;
+            AppendStatus("복원 대기를 취소했습니다. 완료로 기록하지 않았습니다. 현재 화면 상태를 확인해 주세요.");
         }
         catch (ApplyException ex)
         {
-            AppendStatus("Revert failed: " + ex.Message);
+            AppendStatus("화면 복원 실패: " + ex.Message);
         }
         catch (Exception ex)
         {
-            AppendStatus("Revert failed (unexpected): " + ex.Message);
+            AppendStatus("예상하지 못한 복원 오류: " + ex.Message);
         }
         finally
         {
-            IsBusy = false;
-            LoadMonitors(announce: false);
-            RefreshDriverStatus();
-            RefreshCompositorStatus();
-            _ = Hiding.RefreshAsync();
+            await FinishOperationAsync(refreshHiding: true);
         }
     }
 
-    /// <summary>Tray "Apply last": re-applies the persisted settings without touching the UI selection.</summary>
-    public async Task ApplyLastAsync()
+    public Task ReorderDisplayAsync(int slot) => DesktopUiThread.RunAsync(_dispatcher, () => ReorderDisplayCoreAsync(slot));
+    private async Task ReorderDisplayCoreAsync(int slot)
     {
+        if (IsUiPreview || IsBusy || _closing || !_initialized) return;
+        using var cancellation = BeginOperation(DisplayOperationState.Reordering);
+        IsBusy = true;
+        try { string device = _desktopActions.ForegroundDevice(); AppendStatus(await Task.Run(() => _desktopActions.Reorder(slot, device, cancellation.Token)).ConfigureAwait(true)); OperationState = DisplayOperationState.Completed; }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { OperationState = DisplayOperationState.Cancelled; AppendStatus("배치 변경 대기를 취소했습니다."); }
+        catch (Exception ex) { AppendStatus("배치 변경 실패: " + ex.Message); }
+        finally { await FinishOperationAsync(); }
+    }
+
+    public event Action<WindowBox>? PrimaryHighlightRequested;
+
+    public Task SetPrimaryAsync(int slot) => DesktopUiThread.RunAsync(_dispatcher, () => SetPrimaryCoreAsync(slot));
+    private async Task SetPrimaryCoreAsync(int slot)
+    {
+        if (IsUiPreview || IsBusy || _closing || !_initialized || SelectedMonitor is null || SelectedLayout is null) return;
+        if (!MatchesActiveMatrix) { AppendStatus("선택한 모니터·분할 방식과 실행 중인 그룹이 다릅니다. 다른 그룹의 선택 칸은 변경하지 않았습니다."); return; }
+        string path = SelectedMonitor.MonitorDevicePath;
+        var layout = SelectedLayout.Kind;
+        using var cancellation = BeginOperation(DisplayOperationState.Reordering);
+        IsBusy = true;
+        try {
+            var target = await Task.Run(() => _desktopActions.Select(slot, path, layout, cancellation.Token));
+            if (_closing || cancellation.IsCancellationRequested) return;
+            AppendStatus($"이 분할 그룹의 선택 칸을 {slot}번으로 선택했습니다.");
+            _primarySlot = slot;
+            _liveSelectedSlot = slot;
+            _selectionPending = false;
+            OnPropertyChanged(nameof(SelectedPrimarySlot));
+            foreach (var zone in Zones) zone.IsPrimary = zone.Number == slot;
+            OperationState = DisplayOperationState.Completed;
+            try { PrimaryHighlightRequested?.Invoke(target.Bounds); }
+            catch (Exception error) { AppendStatus("선택 칸은 저장했으나 강조 표시를 띄우지 못했습니다: " + error.Message); }
+        } catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { OperationState = DisplayOperationState.Cancelled; AppendStatus("선택 칸 선택 대기를 취소했습니다."); }
+        catch (Exception error) { AppendStatus("선택 칸 선택 실패: " + error.Message); }
+        finally { await FinishOperationAsync(); }
+    }
+
+    /// <summary>Tray "Apply last": re-applies the persisted settings without touching the UI selection.</summary>
+    public Task ApplyLastAsync() => DesktopUiThread.RunAsync(_dispatcher, ApplyLastCoreAsync);
+    private async Task ApplyLastCoreAsync()
+    {
+        if (IsUiPreview || IsBusy || _closing || !_initialized) return;
         AppSettings? settings = SettingsStore.Load();
         if (settings is null || settings.Segments.Count == 0)
         {
-            AppendStatus("No previously applied configuration found.");
+            AppendStatus("이전에 적용한 분할 설정이 없습니다.");
             return;
         }
         if (!RestoreSettings(settings))
         {
-            AppendStatus($"Monitor '{settings.PhysicalDevice}' from the saved settings is not connected.");
+            AppendStatus($"저장된 설정의 모니터 {settings.PhysicalDevice}가 연결되어 있지 않습니다.");
             return;
         }
         await ApplyAsync().ConfigureAwait(true);
@@ -868,69 +1113,85 @@ public sealed class MainViewModel : ObservableObject
 
     // ------------------------------------------------------------------ status helpers
 
-    public void RefreshDriverStatus()
-    {
-        try
-        {
-            if (!DriverClient.TryFindDevicePath(out string path))
-            {
-                DriverStatus = DriverClient.DriverMissingMessage;
-                return;
-            }
-            try
-            {
-                DESKSPLIT_STATUS status = DriverClient.GetStatus();
-                DriverStatus = $"Driver OK (protocol v{status.Version}, {status.ActiveMonitorCount} virtual monitor(s)).";
-            }
-            catch (DriverIoException)
-            {
-                DriverStatus = $"Driver device found ({path}) but GET_STATUS failed.";
-            }
-        }
-        catch (Exception ex)
-        {
-            DriverStatus = "Driver check failed: " + ex.Message;
-        }
-    }
-
-    public void RefreshCompositorStatus()
-    {
-        if (CompositorLauncher.IsRunning())
-        {
-            CompositorStatus = "Compositor: running.";
-        }
-        else if (CompositorLauncher.TryFindExecutable(out string exe))
-        {
-            CompositorStatus = $"Compositor: stopped ({exe}).";
-        }
-        else
-        {
-            CompositorStatus = $"Compositor: not found — expected {CompositorLauncher.ExpectedPath}.";
-        }
-    }
-
     public void AppendStatus(string line)
     {
         lock (_statusLock)
         {
             string stamped = $"[{DateTime.Now:HH:mm:ss}] {line}";
-            StatusText = string.IsNullOrEmpty(StatusText) ? stamped : StatusText + Environment.NewLine + stamped;
+            _statusLog.Append(stamped);
+            _fileLog?.Append(stamped);
+            if (_statusNotificationQueued) return;
+            _statusNotificationQueued = true;
         }
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null) PublishStatus();
+        else if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(PublishStatus));
+    }
+
+    private void PublishStatus()
+    {
+        lock (_statusLock) { _statusNotificationQueued = false; StatusText = _statusLog.ToString(); }
         StatusAppended?.Invoke(this, EventArgs.Empty);
     }
 
     public event EventHandler? StatusAppended;
+
+    private void NotifyMatrixState()
+    {
+        OnPropertyChanged(nameof(IsOriginalScreen));
+        OnPropertyChanged(nameof(OriginalScreenText));
+        OnPropertyChanged(nameof(IsActiveMatrix));
+        OnPropertyChanged(nameof(DisplayStateText));
+        OnPropertyChanged(nameof(MatrixStateText));
+        OnPropertyChanged(nameof(PrimaryChoices));
+        OnPropertyChanged(nameof(SelectedPrimarySlot));
+        foreach (var zone in Zones) zone.IsPrimary = MatchesActiveMatrix && zone.Number == _liveSelectedSlot;
+    }
 
     private void RaiseCommandStates()
     {
         OnPropertyChanged(nameof(CanApply));
         ApplyCommand.RaiseCanExecuteChanged();
         RevertCommand.RaiseCanExecuteChanged();
+        CancelOperationCommand.RaiseCanExecuteChanged();
+        SetPrimaryCommand.RaiseCanExecuteChanged();
         RefreshMonitorsCommand.RaiseCanExecuteChanged();
         ResetSegmentsCommand.RaiseCanExecuteChanged();
     }
 
     // ------------------------------------------------------------------ settings
+
+    private CancellationTokenSource BeginOperation(DisplayOperationState phase)
+    {
+        OperationState = phase;
+        _operationCancellation = new CancellationTokenSource();
+        _operationFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        return _operationCancellation;
+    }
+
+    private void EndOperation()
+    {
+        if (OperationState is not (DisplayOperationState.Completed or DisplayOperationState.Cancelled)) OperationState = DisplayOperationState.Failed;
+        _operationCancellation = null;
+        IsBusy = false;
+        _operationFinished?.TrySetResult();
+        _operationFinished = null;
+    }
+
+    private async Task FinishOperationAsync(bool refreshHiding = false)
+    {
+        EndOperation();
+        await RefreshMonitorsAsync();
+        if (refreshHiding && !_closing) _ = Hiding.RefreshAsync();
+    }
+
+    public void CancelPendingOperations()
+    {
+        try { _operationCancellation?.Cancel(); } catch (ObjectDisposedException) { }
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess()) CancelOperationCommand.RaiseCanExecuteChanged();
+        else if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvoke(new Action(CancelOperationCommand.RaiseCanExecuteChanged));
+    }
 
     private void RestoreSettings() => RestoreSettings(SettingsStore.Load());
 
@@ -938,16 +1199,16 @@ public sealed class MainViewModel : ObservableObject
     {
         if (settings is null) return false;
 
-        MonitorInfo? monitor = Monitors.FirstOrDefault(
-                                   m => string.Equals(m.DeviceName, settings.PhysicalDevice, StringComparison.OrdinalIgnoreCase))
-                               ?? Monitors.FirstOrDefault(
-                                   m => string.Equals(m.FriendlyName, settings.PhysicalFriendlyName, StringComparison.OrdinalIgnoreCase));
+        MonitorInfo? monitor = MonitorSelection.Find(Monitors, settings.PhysicalMonitorPath, settings.PhysicalDevice, settings.PhysicalFriendlyName);
         if (monitor is null) return false;
 
         _suppressSegmentRebuild = true;
         try
         {
             _selectedMonitor = monitor;
+            _preferredMonitorPath = monitor.MonitorDevicePath;
+            _preferredMonitorDevice = monitor.DeviceName;
+            _selectionPending = false;
             _selectedLayout = LayoutDefinition.FromKind(settings.Layout);
         }
         finally { _suppressSegmentRebuild = false; }
@@ -968,7 +1229,7 @@ public sealed class MainViewModel : ObservableObject
             finally { _editorSuspended = false; }
 
             RebuildEditor();
-            AppendStatus($"Restored last settings from {SettingsStore.FilePath}.");
+            AppendStatus($"마지막 편집 설정을 불러왔습니다: {SettingsStore.FilePath}");
         }
 
         RaiseCommandStates();

@@ -85,6 +85,7 @@ struct App {
 };
 
 App* g_app = nullptr;
+const UINT g_layoutMessage = ::RegisterWindowMessageW(kLiveLayoutMessage);
 
 BOOL WINAPI ConsoleCtrlHandler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
@@ -154,6 +155,19 @@ void OnSuspendStateChanged(void* context, bool suspended, SuspendReason why) {
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     App* app = g_app;
+    if (g_layoutMessage != 0 && msg == g_layoutMessage && app) {
+        if (wParam == 0) return static_cast<LRESULT>(app->renderer.Routing());
+        if (wParam == 2) return static_cast<LRESULT>(LayoutFingerprint(app->config));
+        // No pointers cross the process boundary. Both maps include a protocol signature.
+        if (wParam == 1) {
+            const uint64_t payload = static_cast<uint64_t>(lParam);
+            const uint32_t expected = static_cast<uint32_t>(payload >> 32);
+            const uint32_t desired = static_cast<uint32_t>(payload);
+            if (!app->session.IsSuspended() && app->renderer.ExchangeRouting(expected, desired))
+                return static_cast<LRESULT>(desired);
+        }
+        return 0;
+    }
     switch (msg) {
     case WM_WTSSESSION_CHANGE:
         if (app && app->session.OnSessionChange(wParam)) return 0;
@@ -275,7 +289,7 @@ HANDLE OpenOrCreateStopEvent() {
 }
 
 void StartStopWatcher(App& app) {
-    app.stopEvent = OpenOrCreateStopEvent();
+    if (!app.stopEvent) app.stopEvent = OpenOrCreateStopEvent();
     if (!app.stopEvent) return;
 
     app.quitWatcher = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -327,7 +341,7 @@ void PrintUsage() {
                L"                   THEN TOGGLE: the display goes black when it leaves\n"
                L"                   the desktop, and this makes that a blink rather\n"
                L"                   than a dark screen. Falls back to the window path\n"
-               L"                   if the wait expires.\n"
+               L"                   if the wait expires. -1 waits until stopped.\n"
                L"  --frame-deadline <s>\n"
                L"                   Acquired but no frame scanned out within <s>\n"
                L"                   seconds means a black panel: release and exit 20.\n"
@@ -351,6 +365,12 @@ int Run(HINSTANCE hinst, const Options& opt) {
     App app;
     app.opt = opt;
     g_app = &app;
+    app.stopEvent = OpenOrCreateStopEvent();
+    struct StopGuard {
+        App& app;
+        ~StopGuard() { StopWatcher(app); g_app = nullptr; }
+    } stopGuard{app};
+    app.renderer.SetStopEvent(app.stopEvent);
 
     if (!LoadConfig(opt.configPath, app.config)) {
         DS_ERR(L"failed to load config from '%s'", opt.configPath.c_str());
@@ -388,6 +408,8 @@ int Run(HINSTANCE hinst, const Options& opt) {
         app.renderer.DecidePresenter(opt.specialized, opt.waitForTarget,
                                      opt.frameDeadline);
     const bool specializedActive = (kind == PresenterKind::Specialized);
+    if (app.stopEvent && ::WaitForSingleObject(app.stopEvent, 0) == WAIT_OBJECT_0)
+        return exitcode::kOk;
 
     // 3. Now create the right kind of window and bind the presenter to it.
     if (!CreateCompositorWindow(app, hinst, specializedActive)) {
@@ -524,7 +546,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 opt.specialized = true;
             } else if (a == L"--wait-for-target" && i + 1 < argc) {
                 opt.waitForTarget = ::_wtoi(argv[++i]);
-                if (opt.waitForTarget < 0) opt.waitForTarget = 0;
+                if (opt.waitForTarget < -1) opt.waitForTarget = -1;
                 opt.specialized = true;   // waiting only makes sense there
             } else if (a == L"--test-pattern") {
                 opt.testPattern = true;

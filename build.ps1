@@ -3,7 +3,7 @@
 #   - compositor (dscomp.exe)        : VS C++ (v143+)
 #   - installer/devcreate            : VS C++ (v143+)
 #   - installer/edid-override        : VS C++ (v143+)
-#   - app (DesktopSplitter.exe)      : .NET SDK 8+
+#   - app (DesktopSplitter.exe)      : .NET SDK 10 (global.json)
 #   - driver (DesktopSplitterVdd)    : only if the WDK is installed
 #   - installer/setup                : only if the signed driver package exists
 #
@@ -205,8 +205,7 @@ Write-Host "  compositor : compositor\build\x64\$Configuration\dscomp.exe"
 Write-Host "  devcreate  : installer\devcreate\bin\x64\$Configuration\devcreate.exe"
 Write-Host "  edidoverr. : installer\edid-override\build\x64\$Configuration\edidoverride.exe"
 
-# The app's target framework moves (net8.0-windows -> net8.0-windows10.0.19041.0
-# for WinRT), so resolve the real output rather than hardcoding a TFM.
+# Resolve the real output rather than hardcoding the app's target framework.
 $appExe = Get-ChildItem -Path (Join-Path $root "app\bin\$Configuration") -Filter 'DesktopSplitter.exe' `
     -Recurse -File -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1

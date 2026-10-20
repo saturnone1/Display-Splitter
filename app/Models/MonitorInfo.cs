@@ -5,7 +5,7 @@ namespace DesktopSplitter.Models;
 /// <summary>
 /// A monitor as reported by QueryDisplayConfig + EnumDisplaySettingsEx.
 /// </summary>
-public sealed class MonitorInfo
+public sealed record MonitorInfo
 {
     /// <summary>GDI device name, e.g. <c>\\.\DISPLAY1</c>.</summary>
     public string DeviceName { get; init; } = string.Empty;
@@ -82,7 +82,7 @@ public sealed class MonitorInfo
     /// </summary>
     public string DisplayLabel =>
         string.IsNullOrWhiteSpace(FriendlyName)
-            ? $"Display {(Index == int.MaxValue || Index <= 0 ? 1 : Index)}"
+            ? $"디스플레이 {(Index == int.MaxValue || Index <= 0 ? 1 : Index)}"
             : FriendlyName.Trim();
 
     /// <summary>
@@ -93,12 +93,12 @@ public sealed class MonitorInfo
     {
         get
         {
-            string device = string.IsNullOrWhiteSpace(DeviceName) ? "(unknown device)" : DeviceName;
+            string device = string.IsNullOrWhiteSpace(DeviceName) ? "(장치 정보 없음)" : DeviceName;
             string mode = CurrentWidth > 0 && CurrentHeight > 0
                 ? $"{CurrentWidth}x{CurrentHeight}"
-                : "unknown size";
+                : "크기 확인 불가";
             string hz = MaxRefreshHz > 0 ? $" @ {MaxRefreshHz}Hz" : string.Empty;
-            string primary = IsPrimary ? "  (primary)" : string.Empty;
+            string primary = IsPrimary ? "  (주 모니터)" : string.Empty;
             return $"{DisplayLabel} — {device} — {mode}{hz}{primary}";
         }
     }
@@ -107,7 +107,7 @@ public sealed class MonitorInfo
     public string CurrentModeText =>
         CurrentWidth > 0 && CurrentHeight > 0
             ? $"{CurrentWidth}x{CurrentHeight} @ {(CurrentRefreshHz > 0 ? CurrentRefreshHz : MaxRefreshHz)} Hz"
-            : "unknown";
+            : "확인 불가";
 
     public override string ToString() => Caption;
 }

@@ -51,7 +51,7 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <SDLCheck>true</SDLCheck>
@@ -81,7 +81,8 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <!-- The installer does not deploy VC++ redist DLLs. Keep Release self-contained. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -106,11 +107,13 @@
   <ItemGroup>
     <ClInclude Include="src\Capture.h" />
     <ClInclude Include="src\Common.h" />
+    <ClInclude Include="src\DisplayTaskCompat.h" />
     <ClInclude Include="src\Config.h" />
     <ClInclude Include="src\CursorConfine.h" />
     <ClInclude Include="src\Geometry.h" />
     <ClInclude Include="src\Json.h" />
     <ClInclude Include="src\Log.h" />
+    <ClInclude Include="src\LiveLayout.h" />
     <ClInclude Include="src\MonitorUtil.h" />
     <ClInclude Include="src\Presenter.h" />
     <ClInclude Include="src\PresenterSelect.h" />

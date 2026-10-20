@@ -10,16 +10,28 @@
 
 #include <windows.h>
 #include <bugcodes.h>
+// UMDF 2.25 headers contain legacy enum forward declarations and POOL_TYPE SAL
+// annotations rejected by the current analyzer. Suppress these header warnings
+// only; keep /W4 /WX and code analysis for our C++20 sources.
+#pragma warning(push)
+#pragma warning(disable: 4471 6553)
 #include <wudfwdm.h>
 #include <wdf.h>
 #include <iddcx.h>
+#pragma warning(pop)
 
 #include <dxgi1_5.h>
 #include <d3d11_2.h>
 #include <avrt.h>
 #include <wrl.h>
 
+// MSVC 14.44's driver analyzer reports the internal make_shared control block
+// as leaked even though shared_ptr takes ownership. Limit the suppression to
+// the STL implementation; C28197 remains enabled for driver code.
+#pragma warning(push)
+#pragma warning(disable: 28197)
 #include <memory>
+#pragma warning(pop)
 #include <mutex>
 #include <vector>
 

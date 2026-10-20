@@ -13,6 +13,7 @@
 #include <windows.devices.display.core.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #pragma warning(pop)
+#include "DisplayTaskCompat.h"
 
 #include <d3d11_4.h>
 #include <sddl.h>
@@ -237,6 +238,7 @@ struct SpecializedPresenter::Impl {
     wddc::DisplayPath        path{ nullptr };
     wddc::DisplayDevice      displayDevice{ nullptr };
     wddc::DisplayTaskPool    taskPool{ nullptr };
+    wddc::IDisplayTaskPool2  taskPool2{ nullptr };
     wddc::DisplaySource      source{ nullptr };
 
     std::vector<wddc::DisplaySurface>                  surfaces;
@@ -251,6 +253,7 @@ struct SpecializedPresenter::Impl {
     bool     ready = false;
 
     Microsoft::WRL::ComPtr<ID3D11Fence> d3dFence;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> fenceContext;
     wddc::DisplayFence                  displayFence{ nullptr };
     uint64_t                            fenceValue = 0;
 
@@ -272,12 +275,14 @@ struct SpecializedPresenter::Impl {
         liveSignalled = false;
         displayFence = nullptr;
         d3dFence.Reset();
+        fenceContext.Reset();
         fenceValue = 0;
         rtvs.clear();
         textures.clear();
         scanouts.clear();
         surfaces.clear();
         source = nullptr;
+        taskPool2 = nullptr;
         taskPool = nullptr;
         displayDevice = nullptr;
         path = nullptr;
@@ -547,6 +552,9 @@ bool SpecializedPresenter::TryAcquireOnce(const PresenterInit& init,
 
         s.displayDevice = s.manager.CreateDisplayDevice(s.target.Adapter());
         s.taskPool = s.displayDevice.CreateTaskPool();
+        s.taskPool2 = s.taskPool.try_as<wddc::IDisplayTaskPool2>();
+        DS_LOG(L"specialized: task submission uses %s",
+               s.taskPool2 ? L"TryExecuteTask" : L"ExecuteTask (Windows 10)");
         s.source = s.displayDevice.CreateScanoutSource(s.target);
 
         // Every field read back from the APPLIED path, as the sample does.
@@ -588,9 +596,13 @@ bool SpecializedPresenter::TryAcquireOnce(const PresenterInit& init,
             }
         }
         if (!s.displayFence) {
-            DS_WARN(L"specialized: could not create a shared scanout fence - "
-                    L"presenting without one is not the supported model and may "
-                    L"fault the display stack");
+            out.detail = L"a shared scanout fence is unavailable; refusing unsynchronized presentation";
+            DS_WARN(L"specialized: %s", out.detail.c_str());
+            return false;
+        }
+        if (FAILED(s.ctx->QueryInterface(IID_PPV_ARGS(&s.fenceContext)))) {
+            out.detail = L"ID3D11DeviceContext4 is unavailable; cannot signal the scanout fence";
+            return false;
         }
         ComPtr<ID3D11Device1> device1;
         if (FAILED(s.device->QueryInterface(IID_PPV_ARGS(&device1)))) {
@@ -659,6 +671,10 @@ bool SpecializedPresenter::TryAcquire(const PresenterInit& init,
     bool announced = false;
 
     for (;;) {
+        if (init.stopEvent && ::WaitForSingleObject(init.stopEvent, 0) == WAIT_OBJECT_0) {
+            out.detail = L"acquisition cancelled by stop request";
+            return false;
+        }
         SpecializedAvailability attempt;
         attempt.requested = true;
         if (TryAcquireOnce(init, attempt)) {
@@ -685,9 +701,11 @@ bool SpecializedPresenter::TryAcquire(const PresenterInit& init,
         const ULONGLONG now = ::GetTickCount64();
         if (!announced) {
             announced = true;
-            DS_LOG(L"specialized: WAITING up to %d second(s) for '%s' to be removed "
-                   L"from the desktop.", waitSeconds,
-                   init.cfg->physicalDevice.c_str());
+            if (waitSeconds < 0)
+                DS_LOG(L"specialized: waiting for '%s' until acquired or explicitly stopped", init.cfg->physicalDevice.c_str());
+            else
+                DS_LOG(L"specialized: WAITING up to %d second(s) for '%s' to be removed from the desktop.", waitSeconds,
+                       init.cfg->physicalDevice.c_str());
             DS_LOG(L"specialized: now go to Settings > System > Display > Advanced "
                    L"display and turn ON 'Remove display from desktop'.");
         }
@@ -701,11 +719,20 @@ bool SpecializedPresenter::TryAcquire(const PresenterInit& init,
                             ? L"still on the desktop (eligible)"
                             : L"still on the desktop (NOT eligible!)";
             }
-            DS_LOG(L"specialized: waiting for '%s'... %ds left  [%s]",
-                   init.cfg->physicalDevice.c_str(),
-                   WaitSecondsRemaining(waitSeconds, elapsed), state);
+            if (waitSeconds < 0)
+                DS_LOG(L"specialized: waiting for '%s' [%s]", init.cfg->physicalDevice.c_str(), state);
+            else
+                DS_LOG(L"specialized: waiting for '%s'... %ds left [%s]", init.cfg->physicalDevice.c_str(),
+                       WaitSecondsRemaining(waitSeconds, elapsed), state);
         }
-        ::Sleep(kWaitPollMs);
+        if (init.stopEvent) {
+            if (::WaitForSingleObject(init.stopEvent, kWaitPollMs) == WAIT_OBJECT_0) {
+                out.detail = L"acquisition cancelled by stop request";
+                return false;
+            }
+        } else {
+            ::Sleep(kWaitPollMs); // Standalone probes without a stop event retain the same polling cadence.
+        }
     }
 }
 
@@ -737,11 +764,9 @@ HRESULT SpecializedPresenter::EndFrame() {
         }
         // Tell the display engine when this primary is safe to scan out.
         if (s.d3dFence && s.displayFence) {
-            ComPtr<ID3D11DeviceContext4> ctx4;
-            if (SUCCEEDED(s.ctx->QueryInterface(IID_PPV_ARGS(&ctx4)))) {
-                std::lock_guard<std::mutex> lock(*s.ctxMutex);
-                ctx4->Signal(s.d3dFence.Get(), ++s.fenceValue);
-            }
+            stage = L"Signal scanout fence";
+            std::lock_guard<std::mutex> lock(*s.ctxMutex);
+            winrt::check_hresult(s.fenceContext->Signal(s.d3dFence.Get(), ++s.fenceValue));
         }
         stage = L"CreateTask";
         auto task = s.taskPool.CreateTask();
@@ -752,11 +777,12 @@ HRESULT SpecializedPresenter::EndFrame() {
             task.SetWait(s.displayFence, s.fenceValue);
         }
 
-        // TryExecuteTask returns a structured result instead of throwing an
-        // opaque HRESULT - this is what tells us WHY a present was refused.
-        stage = L"TryExecuteTask";
-        const auto result = s.taskPool.TryExecuteTask(task);
-        const auto present = result.PresentStatus();
+        // Windows 11 provides structured feedback. Windows 10 has only ExecuteTask;
+        // in that path HRESULT exceptions, fence synchronization and the first-frame
+        // deadline still apply, but there is no per-present status to inspect.
+        stage = s.taskPool2 ? L"TryExecuteTask" : L"ExecuteTask";
+        const auto result = SubmitDisplayTask(s.taskPool, s.taskPool2, task);
+        const auto present = result ? result->PresentStatus() : wddc::DisplayPresentStatus::Success;
         if (present != wddc::DisplayPresentStatus::Success) {
             ++s.consecutiveFailures;
             if (s.consecutiveFailures == 1) {
@@ -764,7 +790,7 @@ HRESULT SpecializedPresenter::EndFrame() {
                        L"PresentStatus = %s, SourceStatus = %s (frame %u, "
                        L"primary %zu of %zu)",
                        PresentStatusName(present),
-                       SourceStatusName(result.SourceStatus()), s.frame, index,
+                       SourceStatusName(result->SourceStatus()), s.frame, index,
                        s.surfaces.size());
                 if (present == wddc::DisplayPresentStatus::DeviceInvalid ||
                     present == wddc::DisplayPresentStatus::UnknownFailure) {

@@ -21,6 +21,8 @@ IDR_APP_EXE           RCDATA  "payload\\DesktopSplitter.exe"
 IDR_DSCOMP_EXE        RCDATA  "payload\\dscomp.exe"
 IDR_DEVCREATE_EXE     RCDATA  "payload\\devcreate.exe"
 IDR_COMPOSITOR_README RCDATA  "payload\\compositor-README.md"
+IDR_FONT_LICENSE      RCDATA  "payload\\NanumSquareRound-LICENSE.txt"
+IDR_FONT_NOTICE       RCDATA  "payload\\NanumSquareRound-NOTICE.txt"
 // The app probes for edidoverride.exe next to its own exe first, so this must
 // land in the install directory root alongside DesktopSplitter.exe.
 IDR_EDIDOVERRIDE_EXE  RCDATA  "payload\\edidoverride.exe"

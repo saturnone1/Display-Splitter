@@ -5,6 +5,7 @@ using System.Windows.Interop;
 using System.Windows.Threading;
 using DesktopSplitter.Interop;
 using DesktopSplitter.Models;
+using Microsoft.Win32;
 
 namespace DesktopSplitter.Views;
 
@@ -19,45 +20,29 @@ namespace DesktopSplitter.Views;
 /// </summary>
 public partial class ManualSpecializationWindow : Window
 {
-    private readonly DispatcherTimer _poll;
     private readonly MonitorInfo _target;
     private readonly bool _wantEnabled;
 
     public ManualSpecializationWindow(MonitorInfo target, bool wantEnabled, string reason)
     {
         InitializeComponent();
+        Services.AppAppearance.AttachWindow(this);
 
         _target = target;
         _wantEnabled = wantEnabled;
 
         string name = $"{target.DisplayLabel} ({target.DeviceName})";
 
-        if (wantEnabled)
-        {
-            HeadingText.Text = "One step in Windows Settings";
-            StepsText.Text =
-                "1.  Press \"Open display settings\" below.\n" +
-                $"2.  Under \"Select a display to view or change its settings\", choose {name}.\n" +
-                "3.  Turn ON \"Remove display from desktop\".\n\n" +
-                "The screen will go black for a moment, then your split appears on it.";
-            StatusText.Text = $"Waiting for {target.DisplayLabel} to leave the desktop...";
-        }
-        else
-        {
-            HeadingText.Text = "Put the display back";
-            StepsText.Text =
-                "1.  Press \"Open display settings\" below.\n" +
-                $"2.  Choose {name}.\n" +
-                "3.  Turn OFF \"Remove display from desktop\".";
-            StatusText.Text = $"Waiting for {target.DisplayLabel} to return to the desktop...";
-            OpenSettingsButton.Content = "Open display settings";
-            CancelButton.Content = "Close";
-        }
-
+        HeadingText.Text = wantEnabled ? "Windows 설정에서 모니터 숨기기" : "모니터를 바탕 화면으로 복원";
+        StepsText.Text = "1. 아래 디스플레이 설정 열기를 누릅니다.\n" +
+            $"2. 설정을 변경할 디스플레이에서 {name}을 선택합니다.\n" +
+            (wantEnabled ? "3. 바탕 화면에서 디스플레이 제거를 켭니다.\n\n화면이 잠시 어두워진 뒤 분할 화면이 나타납니다."
+                         : "3. 바탕 화면에서 디스플레이 제거를 끕니다.");
+        StatusText.Text = wantEnabled ? $"{target.DisplayLabel} 숨김 대기 중…" : $"{target.DisplayLabel} 복원 대기 중…";
+        OpenSettingsButton.Content = "디스플레이 설정 열기";
+        CancelButton.Content = wantEnabled ? "취소" : "닫기";
         ReasonText.Text = reason;
 
-        _poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-        _poll.Tick += (_, _) => Poll();
     }
 
     /// <summary>True once the display reached the state we were waiting for.</summary>
@@ -69,7 +54,7 @@ public partial class ManualSpecializationWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        _poll.Start();
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         Poll();
         Activate();
     }
@@ -93,10 +78,11 @@ public partial class ManualSpecializationWindow : Window
 
     private void Poll()
     {
+        if (_finished) return;
         if (!MonitorSpecialization.TryGet(_target, out SpecializationState state, out int rc))
         {
-            StatusText.Text = $"Could not read the display state (error {rc}). " +
-                              "You can still change the toggle in Settings.";
+            StatusText.Text = $"디스플레이 상태 조회 실패 (오류 {rc}). " +
+                              "Windows 설정에서 직접 변경할 수 있습니다.";
             return;
         }
 
@@ -108,8 +94,8 @@ public partial class ManualSpecializationWindow : Window
         }
 
         StatusText.Text = _wantEnabled
-            ? $"Waiting for {_target.DisplayLabel} to leave the desktop...  (currently on the desktop)"
-            : $"Waiting for {_target.DisplayLabel} to return to the desktop...  (currently hidden)";
+            ? $"{_target.DisplayLabel} 숨김 대기 중… (현재는 일반 모니터로 표시됨)"
+            : $"{_target.DisplayLabel} 복원 대기 중… (현재는 숨겨져 있음)";
     }
 
     private void OpenSettings_Click(object sender, RoutedEventArgs e) => OpenDisplaySettings();
@@ -142,10 +128,28 @@ public partial class ManualSpecializationWindow : Window
     {
         if (_finished) return;
         _finished = true;
-        _poll.Stop();
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         Succeeded = success;
         Finished?.Invoke(success);
         try { Close(); } catch (InvalidOperationException) { /* already closing */ }
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        if (!Dispatcher.HasShutdownStarted) Dispatcher.BeginInvoke(new Action(Poll));
+    }
+
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        Poll();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        if (!_finished) { _finished = true; Finished?.Invoke(false); }
+        base.OnClosed(e);
     }
 
     // ------------------------------------------------------------------ P/Invoke

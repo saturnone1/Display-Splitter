@@ -28,6 +28,7 @@ struct PresenterInit {
     IDXGIFactory5*       factory = nullptr;   // window path only
     IDXGIAdapter1*       adapter = nullptr;
     std::mutex*          ctxMutex = nullptr;  // guards 'ctx'
+    HANDLE               stopEvent = nullptr; // borrowed, including during startup acquisition
 
     // Diagnostic mode override for the specialized path. 5120x1440@240 is a
     // DSC-class mode; being able to ask for the smallest advertised mode tells

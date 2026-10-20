@@ -2,6 +2,7 @@
 #include "WindowPresenter.h"
 #include "SpecializedPresenter.h"
 #include "Log.h"
+#include "FrameTiming.h"
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
@@ -97,7 +98,12 @@ Renderer::~Renderer() {
 
 bool Renderer::InitDevice(const AppConfig& cfg,
                           std::vector<SegmentShared>* segments) {
+    if (cfg.segments.empty() || cfg.segments.size() > 4) {
+        DS_ERR(L"live routing requires between one and four segments");
+        return false;
+    }
     m_cfg = cfg;
+    m_routing.store(IdentityRouting(cfg.segments.size()), std::memory_order_release);
     m_segments = segments;
     m_cursors.resize(cfg.segments.size());
     ::QueryPerformanceFrequency(&m_qpcFreq);
@@ -487,9 +493,11 @@ void Renderer::RenderFrame() {
         ID3D11SamplerState* samplers[] = { m_sampler.Get() };
         m_gpu.ctx->PSSetSamplers(0, 1, samplers);
 
+        const uint32_t routing = m_routing.load(std::memory_order_acquire);
         for (size_t i = 0; i < segCount; ++i) {
             const SegmentConfig& sc = m_cfg.segments[i];
-            const Snapshot& snap = snaps[i];
+            const size_t source = (routing >> (i * 2)) & 3;
+            const Snapshot& snap = snaps[source];
             if (!snap.hasFrame || !snap.srv || snap.frameW == 0 || snap.frameH == 0)
                 continue;
 
@@ -517,7 +525,7 @@ void Renderer::RenderFrame() {
             DrawQuad(snap.srv.Get(), ndcX, ndcY, ndcW, ndcH);
 
             // Cursor, scaled with the segment.
-            const CursorGpu& cg = m_cursors[i];
+            const CursorGpu& cg = m_cursors[source];
             if (snap.cursorVisible && cg.srv && cg.width > 0 && cg.height > 0) {
                 const float scaleX = rw / static_cast<float>(snap.frameW);
                 const float scaleY = rh / static_cast<float>(snap.frameH);
@@ -619,9 +627,17 @@ void Renderer::ThreadMain() {
     DWORD    statsTick = ::GetTickCount();
     uint64_t presented = 0;
     std::vector<uint64_t> lastCaptured(m_segments ? m_segments->size() : 0, 0);
+    FrameTiming<> frameTiming;
 
     while (!m_stop.load(std::memory_order_acquire)) {
+        LARGE_INTEGER frameStart{}, frameEnd{};
+        if (LogIsVerbose()) ::QueryPerformanceCounter(&frameStart);
         RenderFrame();
+        if (LogIsVerbose()) {
+            ::QueryPerformanceCounter(&frameEnd);
+            if (m_qpcFreq.QuadPart > 0)
+                frameTiming.Add(static_cast<double>(frameEnd.QuadPart - frameStart.QuadPart) * 1000.0 / static_cast<double>(m_qpcFreq.QuadPart));
+        }
         ++presented;
 
         // A presenter that failed after it was already presenting means the
@@ -644,6 +660,15 @@ void Renderer::ThreadMain() {
             if (elapsed >= 2000) {
                 wchar_t caps[256] = L"";
                 for (size_t i = 0; i < lastCaptured.size(); ++i) {
+                    auto& segment = (*m_segments)[i];
+                    const auto copies = segment.copySamples.exchange(0, std::memory_order_relaxed);
+                    const auto copyTicks = segment.copyTicks.exchange(0, std::memory_order_relaxed);
+                    const double copyMs = copies && m_qpcFreq.QuadPart > 0
+                        ? static_cast<double>(copyTicks) * 1000.0 / static_cast<double>(m_qpcFreq.QuadPart) / static_cast<double>(copies) : 0.0;
+                    DS_VERB(L"capture seg%zu: acquire=%llu idle=%llu copy-call=%.3fms staging-payload=%.2f MiB/s",
+                        i, static_cast<unsigned long long>(segment.acquireCalls.exchange(0, std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(segment.idlePolls.exchange(0, std::memory_order_relaxed)), copyMs,
+                        static_cast<double>(segment.stagingBytes.exchange(0, std::memory_order_relaxed)) * 1000.0 / static_cast<double>(elapsed) / (1024.0 * 1024.0));
                     const uint64_t total =
                         (*m_segments)[i].framesCaptured.load(std::memory_order_relaxed);
                     wchar_t part[64];
@@ -674,6 +699,8 @@ void Renderer::ThreadMain() {
                                   : 0.0,
                         static_cast<unsigned>(g_diagPresentHr.load(std::memory_order_relaxed)));
                 presented = 0;
+                DS_VERB(L"CPU RenderFrame duration: p95=%.3fms p99=%.3fms (latest %zu calls; excludes PaceFrame; not GPU execution latency)",
+                    frameTiming.Percentile(0.95), frameTiming.Percentile(0.99), frameTiming.Count());
                 statsTick = now;
             }
         }

@@ -1,4 +1,4 @@
-﻿// Driver.cpp - DesktopSplitterVdd
+// Driver.cpp - DesktopSplitterVdd
 //
 // WDF driver entry, IddCx client configuration, dynamic monitor management
 // driven by IOCTL_DESKSPLIT_SET_CONFIG, and the swap-chain drain thread.
@@ -57,6 +57,8 @@ extern "C" DRIVER_INITIALIZE DriverEntry;
 
 EVT_WDF_DRIVER_DEVICE_ADD DeskSplitDeviceAdd;
 EVT_WDF_DEVICE_D0_ENTRY DeskSplitDeviceD0Entry;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP DeskSplitDeviceCleanup;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP DeskSplitMonitorCleanup;
 
 EVT_IDD_CX_DEVICE_IO_CONTROL DeskSplitIoDeviceControl;
 EVT_IDD_CX_ADAPTER_INIT_FINISHED DeskSplitAdapterInitFinished;
@@ -66,6 +68,28 @@ EVT_IDD_CX_MONITOR_GET_DEFAULT_DESCRIPTION_MODES DeskSplitMonitorGetDefaultModes
 EVT_IDD_CX_MONITOR_QUERY_TARGET_MODES DeskSplitMonitorQueryModes;
 EVT_IDD_CX_MONITOR_ASSIGN_SWAPCHAIN DeskSplitMonitorAssignSwapChain;
 EVT_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN DeskSplitMonitorUnassignSwapChain;
+
+// ---------------------------------------------------------------------------
+// Named callbacks retain the WDF function-class annotations for code analysis.
+_Use_decl_annotations_
+void DeskSplitDeviceCleanup(WDFOBJECT Object)
+{
+    auto* wrapper = WdfObjectGet_IndirectDeviceContextWrapper(Object);
+    if (wrapper != nullptr)
+    {
+        wrapper->Cleanup();
+    }
+}
+
+_Use_decl_annotations_
+void DeskSplitMonitorCleanup(WDFOBJECT Object)
+{
+    auto* wrapper = WdfObjectGet_IndirectMonitorContextWrapper(Object);
+    if (wrapper != nullptr)
+    {
+        wrapper->Cleanup();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EDID lookup table
@@ -700,14 +724,7 @@ NTSTATUS IndirectDeviceContext::CreateMonitorLocked(UINT32 MonitorIndex, const D
 
     WDF_OBJECT_ATTRIBUTES Attr;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectMonitorContextWrapper);
-    Attr.EvtCleanupCallback = [](WDFOBJECT Object)
-    {
-        auto* pWrapper = WdfObjectGet_IndirectMonitorContextWrapper(Object);
-        if (pWrapper != nullptr)
-        {
-            pWrapper->Cleanup();
-        }
-    };
+    Attr.EvtCleanupCallback = DeskSplitMonitorCleanup;
 
     IDDCX_MONITOR_INFO MonitorInfo = {};
     MonitorInfo.Size = sizeof(MonitorInfo);
@@ -977,15 +994,7 @@ NTSTATUS DeskSplitDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
 
     WDF_OBJECT_ATTRIBUTES Attr;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
-    Attr.EvtCleanupCallback = [](WDFOBJECT Object)
-    {
-        // Automatically clean up the context when the WDF object is deleted.
-        auto* pWrapper = WdfObjectGet_IndirectDeviceContextWrapper(Object);
-        if (pWrapper != nullptr)
-        {
-            pWrapper->Cleanup();
-        }
-    };
+    Attr.EvtCleanupCallback = DeskSplitDeviceCleanup;
 
     WDFDEVICE Device = nullptr;
     Status = WdfDeviceCreate(&pDeviceInit, &Attr, &Device);

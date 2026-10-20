@@ -352,6 +352,7 @@ bool SegmentCapture::PublishFrame(ID3D11Texture2D* acquired) {
         }
         m_capCtx->Unmap(m_staging.Get(), 0);
         if (FAILED(hr)) return false;
+        if (LogIsVerbose()) m_shared->stagingBytes.fetch_add(static_cast<uint64_t>(sd.Width) * sd.Height * 4, std::memory_order_relaxed);
     }
 
     {
@@ -421,8 +422,10 @@ void SegmentCapture::ThreadMain() {
         DXGI_OUTDUPL_FRAME_INFO info = {};
         ComPtr<IDXGIResource> resource;
         HRESULT hr = m_dupl->AcquireNextFrame(kAcquireTimeoutMs, &info, &resource);
+        if (LogIsVerbose()) m_shared->acquireCalls.fetch_add(1, std::memory_order_relaxed);
 
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+            if (LogIsVerbose()) m_shared->idlePolls.fetch_add(1, std::memory_order_relaxed);
             // No new frame. Idle here, NOT inside AcquireNextFrame, so the
             // shared D3D11 device lock stays free for the render thread.
             if (::WaitForSingleObject(m_stopEvent, kIdlePollMs) == WAIT_OBJECT_0) break;
@@ -443,7 +446,15 @@ void SegmentCapture::ThreadMain() {
         if (info.LastPresentTime.QuadPart != 0 || firstFrame) {
             ComPtr<ID3D11Texture2D> tex;
             if (SUCCEEDED(resource.As(&tex)) && tex) {
+                const bool measure = LogIsVerbose();
+                LARGE_INTEGER before{}, after{};
+                if (measure) ::QueryPerformanceCounter(&before);
                 if (PublishFrame(tex.Get())) firstFrame = false;
+                if (measure) {
+                    ::QueryPerformanceCounter(&after);
+                    m_shared->copyTicks.fetch_add(static_cast<uint64_t>(after.QuadPart - before.QuadPart), std::memory_order_relaxed);
+                    m_shared->copySamples.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
 

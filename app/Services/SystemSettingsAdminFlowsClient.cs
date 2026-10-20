@@ -73,11 +73,18 @@ public static class SystemSettingsAdminFlowsClient
     public static AdminFlowResult TryRun(
         MonitorInfo monitor, bool enable, IProgress<string> log, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (!IsAvailable)
         {
             return new AdminFlowResult(false, $"{ExecutablePath} not found.") { NotAttempted = true };
         }
 
+        if (!string.IsNullOrWhiteSpace(monitor.MonitorDevicePath))
+        {
+            MonitorInfo? connected = DisplayConfig.FindConnectedTarget(monitor.MonitorDevicePath);
+            if (connected is null) return new AdminFlowResult(false, "대상 모니터 연결을 확인하지 못했습니다.") { NotAttempted = true };
+            monitor = connected;
+        }
         IReadOnlyList<string>? args = BuildArguments(monitor, enable);
         if (args is null)
         {
@@ -103,8 +110,10 @@ public static class SystemSettingsAdminFlowsClient
             if (process is null)
                 return new AdminFlowResult(false, "The helper did not start.");
 
-            if (!process.WaitForExit((int)TimeSpan.FromSeconds(60).TotalMilliseconds))
-                return new AdminFlowResult(false, "The helper did not finish within 60 seconds.");
+            // This helper mutates display state. Do not abandon it and start a competing
+            // fallback merely because a clock elapsed; observe its actual exit first.
+            process.WaitForExitAsync(CancellationToken.None).GetAwaiter().GetResult();
+            ct.ThrowIfCancellationRequested();
 
             return process.ExitCode == 0
                 ? new AdminFlowResult(true,
@@ -115,6 +124,7 @@ public static class SystemSettingsAdminFlowsClient
         {
             return new AdminFlowResult(false, "The elevation prompt was dismissed.");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             return new AdminFlowResult(false, $"Could not run {ExecutableName}: {ex.Message}");

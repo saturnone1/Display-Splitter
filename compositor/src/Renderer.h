@@ -5,6 +5,7 @@
 #include "SegmentShared.h"
 #include "Presenter.h"
 #include "PresenterSelect.h"
+#include "LiveLayout.h"
 
 #include <dxgi1_5.h>
 #include <d3d11.h>
@@ -49,6 +50,12 @@ public:
     void RequestResize(UINT width, UINT height);
 
     GpuContext* Gpu() { return &m_gpu; }
+    void SetStopEvent(HANDLE stopEvent) { m_presenterOptions.stopEvent = stopEvent; }
+
+    uint32_t Routing() const { return m_routing.load(std::memory_order_acquire); }
+    bool ExchangeRouting(uint32_t expected, uint32_t desired) {
+        return ds::ExchangeRouting(m_routing, m_cfg.segments.size(), expected, desired);
+    }
 
     // Diagnostic: draw a cycling solid colour instead of the captured segments,
     // so the presentation path can be proven with no capture involved at all.
@@ -89,6 +96,7 @@ private:
 
     HWND        m_hwnd = nullptr;
     AppConfig   m_cfg;
+    std::atomic<uint32_t> m_routing{0};
     std::vector<SegmentShared>* m_segments = nullptr;
 
     GpuContext m_gpu;

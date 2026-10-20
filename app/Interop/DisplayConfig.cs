@@ -150,6 +150,73 @@ public static class DisplayConfig
     public static IReadOnlyList<MonitorInfo> EnumerateVirtual()
         => Enumerate().Where(m => m.IsDeskSplitVirtual).ToList();
 
+    /// <summary>Read-only recovery lookup, including connected targets removed from the desktop.</summary>
+    public static MonitorInfo? FindConnectedTarget(string devicePath)
+    {
+        if (string.IsNullOrWhiteSpace(devicePath)) return null;
+        var (paths, _) = QueryConfig(QDC_ALL_PATHS);
+        var targets = new List<MonitorInfo>();
+        foreach (var path in paths.Where(path => path.targetInfo.targetAvailable))
+        {
+            TargetNameInfo target = GetTargetName(path);
+            if (!string.Equals(target.DevicePath, devicePath, StringComparison.OrdinalIgnoreCase)) continue;
+            targets.Add(new MonitorInfo {
+                DeviceName = GetSourceGdiName(path), FriendlyName = target.FriendlyName,
+                MonitorDevicePath = target.DevicePath,
+                AdapterIdLow = path.targetInfo.adapterId.LowPart,
+                AdapterIdHigh = path.targetInfo.adapterId.HighPart, TargetId = path.targetInfo.id,
+            });
+        }
+        return FindUniqueTarget(targets, devicePath);
+    }
+
+    public static MonitorInfo? FindUniqueTarget(IEnumerable<MonitorInfo> targets, string devicePath)
+    {
+        if (string.IsNullOrWhiteSpace(devicePath)) return null;
+        var matches = targets.Where(target => string.Equals(target.MonitorDevicePath, devicePath, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(target => (target.AdapterIdLow, target.AdapterIdHigh, target.TargetId))
+            .Select(group => group.First()).ToList();
+        if (matches.Count > 1) throw new DisplayConfigException("복원 대상의 장치 식별 정보가 중복되어 화면 변경을 중단했습니다.");
+        return matches.SingleOrDefault();
+    }
+
+    /// <summary>Prepared from live CCD modes; only source positions are changed.
+    /// No refresh, rotation, resolution, path order or persistence flags are changed.</summary>
+    public static (Action Apply, Action Rollback) PreparePositions(
+        IReadOnlyList<DisplayArranger.MonitorPlacement> before,
+        IReadOnlyList<DisplayArranger.MonitorPlacement> desired)
+    {
+        var (paths, original) = QueryActiveConfig();
+        var modes = (DISPLAYCONFIG_MODE_INFO[])original.Clone();
+        var expected = before.ToDictionary(p => p.DeviceName, StringComparer.OrdinalIgnoreCase);
+        var positions = desired.ToDictionary(p => p.DeviceName, StringComparer.OrdinalIgnoreCase);
+        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+        {
+            string device = GetSourceGdiName(path);
+            uint index = path.sourceInfo.modeInfoIdx;
+            if (!expected.TryGetValue(device, out var old) || !positions.TryGetValue(device, out var next)
+                || index >= modes.Length || original[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                throw new DisplayConfigException("화면 연결 상태가 바뀌어 배치 변경을 취소했습니다.");
+            var source = original[index].modeInfo.sourceMode;
+            if (source.position.x != old.X || source.position.y != old.Y || source.width != old.Width || source.height != old.Height
+                || next.Width != old.Width || next.Height != old.Height || next.IsPrimary != old.IsPrimary)
+                throw new DisplayConfigException("화면 모드가 바뀌어 배치 변경을 취소했습니다.");
+            modes[index].modeInfo.sourceMode.position = new POINTL { x = next.X, y = next.Y };
+            found.Add(device);
+        }
+        if (found.Count != expected.Count || positions.Count != expected.Count)
+            throw new DisplayConfigException("화면 목록이 바뀌어 배치 변경을 취소했습니다.");
+        const uint supplied = 0x20, validate = 0x40, apply = 0x80;
+        static void Set(DISPLAYCONFIG_PATH_INFO[] paths, DISPLAYCONFIG_MODE_INFO[] modes, uint flags)
+        {
+            int error = SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, flags);
+            if (error != ERROR_SUCCESS) throw new DisplayConfigException($"Windows 화면 배치 요청 실패 (오류 {error}).");
+        }
+        Set(paths, modes, supplied | validate);
+        return (() => Set(paths, modes, supplied | apply), () => Set(paths, original, supplied | apply));
+    }
+
     /// <summary>Numeric suffix of <c>\\.\DISPLAYn</c>; int.MaxValue if unparseable.</summary>
     public static int DeviceIndex(string deviceName)
     {
@@ -162,18 +229,21 @@ public static class DisplayConfig
     // ------------------------------------------------------------------ internals
 
     private static (DISPLAYCONFIG_PATH_INFO[] Paths, DISPLAYCONFIG_MODE_INFO[] Modes) QueryActiveConfig()
+        => QueryConfig(QDC_ONLY_ACTIVE_PATHS);
+
+    private static (DISPLAYCONFIG_PATH_INFO[] Paths, DISPLAYCONFIG_MODE_INFO[] Modes) QueryConfig(uint flags)
     {
         // The topology can change between the sizing call and the query call; retry.
         for (int attempt = 0; attempt < 5; attempt++)
         {
-            int rc = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out uint pathCount, out uint modeCount);
+            int rc = GetDisplayConfigBufferSizes(flags, out uint pathCount, out uint modeCount);
             if (rc != ERROR_SUCCESS)
                 throw new DisplayConfigException($"GetDisplayConfigBufferSizes failed (error {rc}).");
 
             var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
             var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
 
-            rc = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
+            rc = QueryDisplayConfig(flags, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
             if (rc == ERROR_SUCCESS)
             {
                 Array.Resize(ref paths, (int)pathCount);

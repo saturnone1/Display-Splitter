@@ -6,7 +6,7 @@ namespace DesktopSplitter.Services;
 /// <summary>What the compositor is currently asking for.</summary>
 public enum SuspensionRequest
 {
-    /// <summary>Neither event could be opened — the compositor probably is not running.</summary>
+    /// <summary>No unambiguous compositor state is available; preserve the current primary.</summary>
     Unknown,
 
     /// <summary>The split should be active: segment 1 primary.</summary>
@@ -43,6 +43,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
     private readonly object _stateGate = new();
 
     private Thread? _thread;
+    private CancellationTokenSource? _workerCancellation;
     private EventWaitHandle? _suspend;
     private EventWaitHandle? _resume;
 
@@ -78,6 +79,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
             }
 
             _stop.Reset();
+            _workerCancellation = new CancellationTokenSource();
             IsSuspended = false;
             _thread = new Thread(Loop) { IsBackground = true, Name = "DeskSplit suspend watcher" };
             _thread.Start();
@@ -96,27 +98,26 @@ public sealed class SplitSuspensionWatcher : IDisposable
         lock (_stateGate)
         {
             thread = _thread;
-            _thread = null;
+            if (thread is not null) { _stop.Set(); _workerCancellation?.Cancel(); }
         }
         if (thread is null) return;
 
-        _stop.Set();
-        try { thread.Join(TimeSpan.FromSeconds(3)); } catch { /* best effort */ }
+        thread.Join(); // Called off the UI thread; handles remain valid until the worker exits.
 
         if (restorePrimary && IsSuspended)
         {
             _log.Report("Restoring the split's primary display before stopping the watcher.");
-            MoveTo(_activePrimaryDevice, "segment 1");
+            using (ApplyService.DisplayOperationGate.Enter())
+                ApplyService.SwitchPrimaryTo(_activePrimaryDevice, "segment 1", _log);
         }
 
         IsSuspended = false;
-        CloseHandles();
+        lock (_stateGate) { CloseHandles(); _thread = null; _workerCancellation?.Dispose(); _workerCancellation = null; }
         _log.Report("Stopped watching for lock / UAC transitions.");
     }
 
     /// <summary>
-    /// Reads the desired state without changing anything. Returns Unknown when neither event
-    /// exists (the compositor is not running).
+    /// Reads the desired state without changing anything. Missing or racing signals are Unknown.
     /// </summary>
     public SuspensionRequest ReadDesiredState()
     {
@@ -124,14 +125,12 @@ public sealed class SplitSuspensionWatcher : IDisposable
         bool suspend = _suspend?.WaitOne(TimeSpan.Zero) ?? false;
         bool resume = _resume?.WaitOne(TimeSpan.Zero) ?? false;
 
-        if (suspend && !resume) return SuspensionRequest.Suspended;
-        if (resume && !suspend) return SuspensionRequest.Active;
-        if (_suspend is null && _resume is null) return SuspensionRequest.Unknown;
-
-        // Both or neither: the compositor guarantees exclusivity, so this is a transient race.
-        // Treat it as "active" — the safe direction, since it never strands us suspended.
-        return SuspensionRequest.Active;
+        return DecodeState(suspend, resume);
     }
+
+    public static SuspensionRequest DecodeState(bool suspend, bool resume)
+        => suspend == resume ? SuspensionRequest.Unknown
+            : suspend ? SuspensionRequest.Suspended : SuspensionRequest.Active;
 
     private void Loop()
     {
@@ -157,7 +156,10 @@ public sealed class SplitSuspensionWatcher : IDisposable
 
                 if (_stop.IsSet) break;
                 Reconcile();
+                // Contradictory manual-reset signals must not cause a busy loop.
+                if (ReadDesiredState() == SuspensionRequest.Unknown) _stop.Wait(ReconcilePeriod);
             }
+            catch (OperationCanceledException) when (_stop.IsSet) { break; }
             catch (Exception ex)
             {
                 _log.Report("Suspend/resume watcher error: " + ex.Message);
@@ -171,16 +173,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
     {
         SuspensionRequest desired = ReadDesiredState();
 
-        // The compositor is gone. If a split is still up, make sure we are not left suspended.
-        if (desired == SuspensionRequest.Unknown)
-        {
-            if (IsSuspended && HidingStatus.IsSplitActive())
-            {
-                _log.Report("Compositor events disappeared while suspended — restoring the split's primary.");
-                if (MoveTo(_activePrimaryDevice, "segment 1")) IsSuspended = false;
-            }
-            return;
-        }
+        if (desired == SuspensionRequest.Unknown) return;
 
         bool wantSuspended = desired == SuspensionRequest.Suspended;
         if (wantSuspended == IsSuspended) return;   // already there: repeated signals are no-ops
@@ -213,8 +206,9 @@ public sealed class SplitSuspensionWatcher : IDisposable
     {
         if (string.IsNullOrEmpty(device)) return false;
 
-        lock (ApplyService.DisplayOperationGate)
+        using (ApplyService.DisplayOperationGate.Enter(_workerCancellation?.Token ?? CancellationToken.None))
         {
+            if (_stop.IsSet) return false;
             // Re-check inside the gate: an Apply or Revert may have changed everything while we
             // were queued behind it.
             if (!HidingStatus.IsSplitActive())

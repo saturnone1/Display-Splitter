@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using System.Runtime.InteropServices;
 using DesktopSplitter.Models;
 using DesktopSplitter.Services;
 using DesktopSplitter.ViewModels;
@@ -17,7 +18,12 @@ public partial class MainWindow : Window, IHidingUi
 
     private readonly MainViewModel _viewModel;
     private readonly TrayIconService? _tray;
-    private readonly DispatcherTimer _displayChangeDebounce;
+    private bool _displayRefreshQueued;
+    private GlobalShortcutService? _shortcuts;
+    private bool _shortcutBusy;
+    private bool _shortcutEditing;
+    private HwndSource? _shortcutSource;
+    private PrimaryHighlightWindow? _primaryHighlight;
 
     public MainWindow() : this(new MainViewModel(), null) { }
 
@@ -27,17 +33,13 @@ public partial class MainWindow : Window, IHidingUi
         _tray = tray;
 
         InitializeComponent();
+        AppAppearance.AttachWindow(this);
         DataContext = _viewModel;
 
         // Windows fires WM_DISPLAYCHANGE several times per topology change.
-        _displayChangeDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
-        _displayChangeDebounce.Tick += (_, _) =>
-        {
-            _displayChangeDebounce.Stop();
-            _viewModel.OnDisplayChanged();
-        };
 
         _viewModel.MinimizeToTrayRequested += (_, _) => HideToTray();
+        _viewModel.PrimaryHighlightRequested += ShowPrimaryHighlight;
         _viewModel.StatusAppended += (_, _) => Dispatcher.BeginInvoke(new Action(() => StatusBox.ScrollToEnd()));
 
         _viewModel.Hiding.AttachUi(this);
@@ -48,6 +50,8 @@ public partial class MainWindow : Window, IHidingUi
             ? "DesktopSplitter"
             : $"DesktopSplitter {MainViewModel.VersionText}";
         VersionLabel.Text = MainViewModel.VersionText;
+        if (_viewModel.IsUiPreview) Title += " — UI 미리 보기 · 디스플레이 변경 없음";
+        else if (_viewModel.IsManualReview) Title += " — 수동 검토 · 자동 적용 및 복구 꺼짐";
     }
 
     // ------------------------------------------------------------------ IHidingUi
@@ -80,10 +84,10 @@ public partial class MainWindow : Window, IHidingUi
     {
         var window = new CountdownWindow(
             seconds,
-            heading: "Keep these display settings?",
-            detail: $"Applied: {summary}." + Environment.NewLine +
-                    "If anything looks wrong, or you cannot see this clearly, do nothing — " +
-                    "the previous settings come back when the countdown reaches zero.");
+            heading: "이 화면 설정을 유지할까요?",
+            detail: $"적용한 설정: {summary}." + Environment.NewLine +
+                    "화면이 제대로 보이지 않으면 기다려 주세요. " +
+                    "시간이 지나면 자동으로 이전 설정으로 돌아갑니다.");
 
         window.Answered += keep =>
         {
@@ -135,19 +139,143 @@ public partial class MainWindow : Window, IHidingUi
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        if (PresentationSource.FromVisual(this) is HwndSource source)
-            source.AddHook(WndProc);
+        _shortcutSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+        _shortcutSource?.AddHook(WndProc);
+        if (!_viewModel.IsUiPreview && Application.Current is not App { IsDiagnosticHost: true })
+        {
+            _shortcuts = new GlobalShortcutService(new WindowInteropHelper(this).Handle);
+            _shortcuts.Pressed += OnShortcut;
+            _viewModel.Shortcuts.AttachRegistrar(_shortcuts.Configure, () => _shortcuts.RegistrationErrors);
+        }
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (msg == WM_DISPLAYCHANGE)
+        if (_shortcuts?.HandleMessage(msg, wParam, lParam) == true) handled = true;
+        if (msg == WM_DISPLAYCHANGE && !_displayRefreshQueued)
         {
-            _displayChangeDebounce.Stop();
-            _displayChangeDebounce.Start();
+            _displayRefreshQueued = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => {
+                _displayRefreshQueued = false;
+                if (_shortcutSource is not null) _viewModel.OnDisplayChanged();
+            }));
         }
         return IntPtr.Zero;
     }
+
+    private async void OnShortcut(ShortcutAction action)
+    {
+        try { await ProcessShortcutAsync(action); }
+        catch (Exception error) { _viewModel.AppendStatus("단축키 실행 실패: " + error.Message); }
+    }
+
+    private Task ProcessShortcutAsync(ShortcutAction action)
+        => DesktopUiThread.RunAsync(Dispatcher, () => HandleShortcutAsync(action));
+
+    private async Task HandleShortcutAsync(ShortcutAction action)
+    {
+        _viewModel.Shortcuts.RecordReceived(action);
+        if (!ShortcutExecutionPolicy.CanExecute(action, _shortcutEditing, _viewModel.IsBusy, _shortcutBusy))
+        {
+            _viewModel.AppendStatus("키 입력 중이거나 다른 작업이 진행 중이라 단축키 동작을 건너뜁니다.");
+            return;
+        }
+        if (action == ShortcutAction.ShowApp)
+        {
+            try
+            {
+                Show();
+                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                bool activated = Activate();
+                bool foreground = SetForegroundWindow(new WindowInteropHelper(this).Handle);
+                if (!activated && !foreground)
+                    _viewModel.AppendStatus("앱 창을 열었지만 Windows가 전경 전환을 허용하지 않았습니다. 작업 표시줄에서 앱을 선택해 주세요.");
+            }
+            catch (Exception ex) { _viewModel.AppendStatus("앱 창 열기 실패: " + ex.Message); }
+            return;
+        }
+        _shortcutBusy = true;
+        try
+        {
+            switch (action)
+            {
+                case ShortcutAction.Apply:
+                    await _viewModel.ApplyAsync();
+                    break;
+                case ShortcutAction.Revert:
+                    await _viewModel.RevertAsync();
+                    break;
+                case ShortcutAction.Primary1:
+                case ShortcutAction.Primary2:
+                case ShortcutAction.Primary3:
+                case ShortcutAction.Primary4:
+                    await _viewModel.SetPrimaryAsync(ShortcutSettings.PrimaryNumber(action)!.Value);
+                    break;
+                case ShortcutAction.Arrange1:
+                case ShortcutAction.Arrange2:
+                case ShortcutAction.Arrange3:
+                case ShortcutAction.Arrange4:
+                    await _viewModel.ReorderDisplayAsync(ShortcutSettings.ArrangementNumber(action)!.Value);
+                    break;
+            }
+        }
+        catch (Exception ex) { _viewModel.AppendStatus("단축키 실행 실패: " + ex.Message); }
+        finally { _shortcutBusy = false; }
+    }
+
+    private void Shortcut_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox input) return;
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        ModifierKeys modifiers = Keyboard.Modifiers;
+        if ((modifiers & (ModifierKeys.Control | ModifierKeys.Alt | ModifierKeys.Windows)) == 0) return;
+        e.Handled = true;
+        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin) return;
+        var parts = new List<string>();
+        if (modifiers.HasFlag(ModifierKeys.Control)) parts.Add("Ctrl");
+        if (modifiers.HasFlag(ModifierKeys.Alt)) parts.Add("Alt");
+        if (modifiers.HasFlag(ModifierKeys.Shift)) parts.Add("Shift");
+        if (modifiers.HasFlag(ModifierKeys.Windows)) parts.Add("Win");
+        parts.Add(ShortcutChord.KeyName(key));
+        input.SetCurrentValue(TextBox.TextProperty, string.Join("+", parts));
+        input.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+    }
+
+    private void Shortcut_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (_shortcutEditing) return;
+        _shortcutEditing = true;
+        _viewModel.Shortcuts.SetEditing(true);
+    }
+
+    private void Shortcut_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (e.NewFocus is TextBox { DataContext: ShortcutRowViewModel }) return;
+        _shortcutEditing = false;
+        _viewModel.Shortcuts.SetEditing(false);
+    }
+
+    protected override void OnDeactivated(EventArgs e)
+    {
+        base.OnDeactivated(e);
+        // WPF can retain logical focus in a textbox after the window loses focus.
+        // Never leave global shortcuts suspended while the user works in another app.
+        if (!_shortcutEditing) return;
+        _shortcutEditing = false;
+        _viewModel.Shortcuts.SetEditing(false);
+    }
+
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        if (_shortcutEditing || Keyboard.FocusedElement is not TextBox { DataContext: ShortcutRowViewModel }) return;
+        _shortcutEditing = true;
+        _viewModel.Shortcuts.SetEditing(true);
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint window);
 
     // ------------------------------------------------------------------ splitter dragging
 
@@ -192,7 +320,7 @@ public partial class MainWindow : Window, IHidingUi
     {
         Hide();
         _tray?.ShowBalloon("DesktopSplitter",
-            "Still running in the tray. Right-click the icon for Apply last / Revert / Exit.");
+            "트레이에서 실행 중입니다. 아이콘을 마우스 오른쪽 버튼으로 누르면 적용·복원·종료 메뉴가 표시됩니다.");
     }
 
     protected override void OnClosing(CancelEventArgs e)
@@ -209,6 +337,35 @@ public partial class MainWindow : Window, IHidingUi
         }
 
         base.OnClosing(e);
+    }
+
+    private void ShowPrimaryHighlight(WindowBox bounds)
+    {
+        if (_viewModel.IsUiPreview || Application.Current is App { IsDiagnosticHost: true }) return;
+        _primaryHighlight?.Close();
+        var highlight = new PrimaryHighlightWindow(bounds);
+        _primaryHighlight = highlight;
+        highlight.Closed += (_, _) => { if (ReferenceEquals(_primaryHighlight, highlight)) _primaryHighlight = null; };
+        try { highlight.Show(); }
+        catch { highlight.Close(); throw; }
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _viewModel.PrimaryHighlightRequested -= ShowPrimaryHighlight;
+        _primaryHighlight?.Close();
+        _shortcutSource?.RemoveHook(WndProc);
+        _shortcutSource = null;
+        _viewModel.Shortcuts.DetachRegistrar();
+        if (_shortcuts is not null)
+        {
+            _shortcuts.Pressed -= OnShortcut;
+            _shortcuts.Dispose();
+        }
+        _viewModel.Hiding.CancelRefresh();
+        base.OnClosed(e);
+        // Closing can be cancelled, and calling Close again from Closing throws.
+        // Start application teardown only after this window has actually closed.
         if (Application.Current is App app && !app.IsExiting) app.ExitApplication();
     }
 }

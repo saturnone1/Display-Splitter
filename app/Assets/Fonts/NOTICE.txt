@@ -1,0 +1,9 @@
+This application uses NAVER's unmodified NanumSquareRound Regular and Bold fonts.
+Copyright (c) 2010, NAVER Corporation. Reserved Font Name: NanumSquareRound.
+Licensed under the SIL Open Font License 1.1; the full official notice and license
+are reproduced in LICENSE.txt in this directory.
+
+Official catalog: https://hangeul.naver.com/fonts/search?f=nanum
+Download: https://hangeul.naver.com/hangeul_static/webfont/zips/nanum-square-round.zip
+License: https://help.naver.com/service/30016/contents/18088?osType=PC&lang=ko
+The fonts are embedded in the application and are not installed into Windows.

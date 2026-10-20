@@ -5,8 +5,30 @@ namespace DesktopSplitter.Models;
 /// <summary>%APPDATA%\DesktopSplitter\settings.json — last applied UI state.</summary>
 public sealed class AppSettings
 {
+    /// <summary>Safety exception: unconfirmed display changes revert. This duration is configurable.</summary>
+    [JsonPropertyName("safetyConfirmationSeconds")]
+    public int SafetyConfirmationSeconds { get; set; } = DefaultSafetyConfirmationSeconds;
+    public const int DefaultSafetyConfirmationSeconds = 15;
+    [JsonPropertyName("shortcuts")]
+    public ShortcutSettings Shortcuts { get; set; } = new();
     [JsonPropertyName("physicalDevice")]
     public string PhysicalDevice { get; set; } = string.Empty;
+
+    [JsonPropertyName("physicalMonitorPath")]
+    public string PhysicalMonitorPath { get; set; } = string.Empty;
+
+    [JsonPropertyName("primarySegmentSlot")]
+    /// <summary>Representative slot inside this split group; unrelated to Windows' global primary monitor.</summary>
+    public int PrimarySegmentSlot { get; set; } = 1;
+
+    [JsonPropertyName("matrixPrimarySlots")]
+    public Dictionary<string, int> MatrixPrimarySlots { get; set; } = new();
+
+    [JsonPropertyName("rememberMatrixWindows")]
+    public bool RememberMatrixWindows { get; set; } = true;
+
+    [JsonPropertyName("matrixMemories")]
+    public List<MatrixSnapshot> MatrixMemories { get; set; } = new();
 
     [JsonPropertyName("physicalFriendlyName")]
     public string PhysicalFriendlyName { get; set; } = string.Empty;
@@ -47,6 +69,10 @@ public sealed class AppSettings
     /// </summary>
     [JsonPropertyName("specializedDevice")]
     public string SpecializedDevice { get; set; } = string.Empty;
+
+    /// <summary>Stable target identity, including while specialization removes its active GDI path.</summary>
+    [JsonPropertyName("specializedDevicePath")]
+    public string SpecializedDevicePath { get; set; } = string.Empty;
 
     /// <summary>
     /// The MonitorIdentityHash recipe id proven to reproduce a real captured

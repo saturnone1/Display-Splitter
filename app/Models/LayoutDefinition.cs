@@ -199,24 +199,24 @@ public sealed class LayoutDefinition
 
     public static IReadOnlyList<LayoutDefinition> All { get; } = new[]
     {
-        Make(LayoutKind.TwoVertical, "2 — side by side", "Two halves split by a vertical line", 2, 1,
+        Make(LayoutKind.TwoVertical, "좌우 2분할", "왼쪽과 오른쪽에 화면 하나씩", 2, 1,
             new[] { 0 }, Array.Empty<int>(),
             new LayoutCell(0.0, 0.0, 0.5, 1.0, 0, 0, 1, 1),
             new LayoutCell(0.5, 0.0, 0.5, 1.0, 1, 0, 1, 1)),
 
-        Make(LayoutKind.TwoHorizontal, "2 — stacked", "Two halves split by a horizontal line", 1, 2,
+        Make(LayoutKind.TwoHorizontal, "상하 2분할", "위쪽과 아래쪽에 화면 하나씩", 1, 2,
             Array.Empty<int>(), new[] { 0 },
             new LayoutCell(0.0, 0.0, 1.0, 0.5, 0, 0, 1, 1),
             new LayoutCell(0.0, 0.5, 1.0, 0.5, 0, 1, 1, 1)),
 
-        Make(LayoutKind.ThreeColumns, "3 — columns", "Three equal columns", 3, 1,
+        Make(LayoutKind.ThreeColumns, "나란히 3분할", "같은 너비로 세 화면 배치", 3, 1,
             new[] { 0, 1 }, Array.Empty<int>(),
             new LayoutCell(0.0,       0.0, 1.0 / 3.0, 1.0, 0, 0, 1, 1),
             new LayoutCell(1.0 / 3.0, 0.0, 1.0 / 3.0, 1.0, 1, 0, 1, 1),
             new LayoutCell(2.0 / 3.0, 0.0, 1.0 / 3.0, 1.0, 2, 0, 1, 1)),
 
-        Make(LayoutKind.BigLeftTwoStackedRight, "3 — big left + 2 right",
-             "One tall segment on the left, two stacked on the right", 2, 2,
+        Make(LayoutKind.BigLeftTwoStackedRight, "왼쪽 크게 · 오른쪽 2분할",
+             "왼쪽 작업 공간과 오른쪽 보조 화면", 2, 2,
             new[] { 0 }, new[] { 0 },
             new LayoutCell(0.0, 0.0, 0.5, 1.0, 0, 0, 1, 2),
             new LayoutCell(0.5, 0.0, 0.5, 0.5, 1, 0, 1, 1),
@@ -226,22 +226,22 @@ public sealed class LayoutDefinition
         // gets promoted to primary, and is where games and the shell land. Segments 2 and 3
         // are the left (track 0) and right (track 2) fillers — segment order deliberately
         // differs from track order; every consumer keys off LayoutCell.Col, never the index.
-        MakeCustom(LayoutKind.SixteenNineCenter, "3 — 16:9 centre",
-             "True 16:9 centre for gaming, side rails fill the rest", 3, 1,
+        MakeCustom(LayoutKind.SixteenNineCenter, "가운데 16:9 · 양쪽 보조",
+             "가운데 게임 화면, 양쪽에 보조 화면", 3, 1,
             new[] { 0, 1 }, Array.Empty<int>(),
             SixteenNineCenterDefaults,
             new LayoutCell(0.25, 0.0, 0.50, 1.0, 1, 0, 1, 1),   // segment 1 — centre
             new LayoutCell(0.00, 0.0, 0.25, 1.0, 0, 0, 1, 1),   // segment 2 — left
             new LayoutCell(0.75, 0.0, 0.25, 1.0, 2, 0, 1, 1)),  // segment 3 — right
 
-        Make(LayoutKind.Grid2x2, "4 — 2x2 grid", "Four quadrants", 2, 2,
+        Make(LayoutKind.Grid2x2, "격자 4분할", "위아래 · 좌우로 네 화면 배치", 2, 2,
             new[] { 0 }, new[] { 0 },
             new LayoutCell(0.0, 0.0, 0.5, 0.5, 0, 0, 1, 1),
             new LayoutCell(0.5, 0.0, 0.5, 0.5, 1, 0, 1, 1),
             new LayoutCell(0.0, 0.5, 0.5, 0.5, 0, 1, 1, 1),
             new LayoutCell(0.5, 0.5, 0.5, 0.5, 1, 1, 1, 1)),
 
-        Make(LayoutKind.FourColumns, "4 — columns", "Four equal columns", 4, 1,
+        Make(LayoutKind.FourColumns, "나란히 4분할", "같은 너비로 네 화면 배치", 4, 1,
             new[] { 0, 1, 2 }, Array.Empty<int>(),
             new LayoutCell(0.00, 0.0, 0.25, 1.0, 0, 0, 1, 1),
             new LayoutCell(0.25, 0.0, 0.25, 1.0, 1, 0, 1, 1),

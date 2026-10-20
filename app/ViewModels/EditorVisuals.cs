@@ -8,6 +8,8 @@ public sealed class ZoneVisual : ObservableObject
     private double _x, _y, _w, _h;
     private string _sizeText = string.Empty;
     private string _aspectNote = string.Empty;
+    private bool _isPrimary;
+    public bool IsPrimary { get => _isPrimary; set => SetProperty(ref _isPrimary, value); }
 
     public ZoneVisual(int index) => Index = index;
 

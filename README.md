@@ -123,13 +123,20 @@ real hardware.
    (device node tool) and `edidoverride` (EDID override helper with the
    guarded keep/revert transaction).
 
+The control app uses **.NET 10 and WPF UI 4.3.0** for Fluent controls and
+a subdued charcoal theme with embedded NanumSquareRound fonts and a system
+high-contrast fallback. The UI compatibility baseline is
+**Windows 10 21H2 (build 19044) and Windows 11, x64**; no Windows 11 backdrop
+is required. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for validation
+status and the remaining cross-OS checks.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 [docs/BUILDING.md](docs/BUILDING.md) for building from source (driver needs
 the WDK; everything else builds with VS2022+ and the .NET SDK).
 
 ## Requirements
 
-- Windows 10 1903+ (Windows 11 recommended); x64
+- Windows 10 **21H2** or Windows 11; x64 (see compatibility validation status above)
 - Any GPU (AMD, NVIDIA, Intel)
 - Display hiding additionally requires Pro for Workstations / Enterprise
 - No test-signing mode, no Secure Boot changes
