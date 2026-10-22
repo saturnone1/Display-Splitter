@@ -1,31 +1,33 @@
-// Live slot routing. Capture threads and GPU resources keep their original indices.
+// Live routing v2: nine four-bit indices, count in bits 36..39, signature in bits 40..63.
 #pragma once
 #include "Common.h"
+#include "../../shared/DeskSplitProtocol.h"
 #include <atomic>
 
 namespace ds {
-constexpr wchar_t kLiveLayoutMessage[] = L"DesktopSplitter.LiveLayout.v1";
-constexpr uint32_t kLayoutSignature = 0x44530000;
+constexpr wchar_t kLiveLayoutMessage[] = L"DesktopSplitter.LiveLayout.v2";
+constexpr uint64_t kLayoutSignature = 0x4453000000000000ull;
 
-inline uint32_t IdentityRouting(size_t count) {
-    uint32_t value = kLayoutSignature | (static_cast<uint32_t>(count) << 8);
-    for (size_t i = 0; i < count && i < 4; ++i)
-        value |= static_cast<uint32_t>(i) << (i * 2);
+inline uint64_t IdentityRouting(size_t count) {
+    if (count < 1 || count > DESKSPLIT_MAX_MONITORS) return 0;
+    uint64_t value = kLayoutSignature | (static_cast<uint64_t>(count) << 36);
+    for (size_t i = 0; i < count; ++i) value |= static_cast<uint64_t>(i) << (i * 4);
     return value;
 }
 
-inline bool ValidRouting(uint32_t value, size_t count) {
-    if (count < 1 || count > 4 || (value & 0xFFFFFF00u) != (kLayoutSignature | (static_cast<uint32_t>(count) << 8))) return false;
+inline bool ValidRouting(uint64_t value, size_t count) {
+    if (count < 1 || count > DESKSPLIT_MAX_MONITORS
+        || (value & 0xFFFFFFF000000000ull) != (kLayoutSignature | (static_cast<uint64_t>(count) << 36))) return false;
     uint32_t seen = 0;
     for (size_t i = 0; i < count; ++i) {
-        const uint32_t index = (value >> (i * 2)) & 3;
+        const uint32_t index = static_cast<uint32_t>((value >> (i * 4)) & 15);
         if (index >= count || (seen & (1u << index))) return false;
         seen |= 1u << index;
     }
-    return (value & 0xFFu) >> (count * 2) == 0;
+    return (value & 0xFFFFFFFFFull) >> (count * 4) == 0;
 }
 
-inline bool ExchangeRouting(std::atomic<uint32_t>& routing, size_t count, uint32_t expected, uint32_t desired) {
+inline bool ExchangeRouting(std::atomic<uint64_t>& routing, size_t count, uint64_t expected, uint64_t desired) {
     return ValidRouting(desired, count) && routing.compare_exchange_strong(expected, desired, std::memory_order_acq_rel);
 }
 

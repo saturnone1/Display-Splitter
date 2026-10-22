@@ -197,7 +197,7 @@ bool DeskSplitBuildEdid(UINT32 MonitorIndex, const DESKSPLIT_MONITOR_CONFIG& Con
             return false;
         }
 
-        const UINT32 VerticalHz = (Config.Modes[ModeIndex].RefreshMillihertz + 999) / 1000;
+        const UINT32 VerticalHz = static_cast<UINT32>((static_cast<UINT64>(Config.Modes[ModeIndex].RefreshMillihertz) + 999) / 1000);
         const UINT32 HorizontalKHz =
             static_cast<UINT32>(((static_cast<UINT64>(Config.Modes[ModeIndex].RefreshMillihertz) *
                                   Timing.VTotal) + 999999) / 1000000);

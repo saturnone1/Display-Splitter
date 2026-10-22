@@ -328,7 +328,7 @@ namespace
             {
                 StringCchPrintfW(Text, ARRAYSIZE(Text),
                     L"Version %s\r\n\r\n"
-                    L"DesktopSplitter turns one monitor into up to four that Windows treats as\r\n"
+                    L"DesktopSplitter turns one monitor into up to nine that Windows treats as\r\n"
                     L"completely separate displays, so windows snap and maximise to each part.\r\n\r\n"
                     L"This installs a virtual display driver, so Windows will ask for administrator\r\n"
                     L"rights and may show a driver warning.\r\n\r\n"

@@ -1,5 +1,6 @@
 #include "Capture.h"
 #include "Log.h"
+#include "PointerShape.h"
 
 #include <d3d11.h>
 
@@ -27,88 +28,6 @@ constexpr UINT kAcquireTimeoutMs = 0;
 constexpr DWORD kIdlePollMs = 1;
 constexpr DWORD kRetryDelayMs = 250;
 
-// Converts a DXGI pointer shape to tightly packed BGRA. Returns false when the
-// shape type is unknown or the buffer is too small.
-bool ConvertPointerShape(const DXGI_OUTDUPL_POINTER_SHAPE_INFO& info,
-                         const std::vector<uint8_t>& raw,
-                         std::vector<uint8_t>& outBgra,
-                         UINT& outWidth, UINT& outHeight) {
-    const UINT pitch = info.Pitch;
-    if (pitch == 0 || info.Width == 0 || info.Height == 0) return false;
-
-    switch (info.Type) {
-    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR: {
-        outWidth = info.Width;
-        outHeight = info.Height;
-        if (raw.size() < static_cast<size_t>(pitch) * outHeight) return false;
-        outBgra.assign(static_cast<size_t>(outWidth) * outHeight * 4, 0);
-        for (UINT y = 0; y < outHeight; ++y) {
-            memcpy(&outBgra[static_cast<size_t>(y) * outWidth * 4],
-                   &raw[static_cast<size_t>(y) * pitch],
-                   static_cast<size_t>(outWidth) * 4);
-        }
-        return true;
-    }
-
-    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME: {
-        // Top half = AND mask, bottom half = XOR mask, 1 bit per pixel.
-        outWidth = info.Width;
-        outHeight = info.Height / 2;
-        if (outHeight == 0) return false;
-        if (raw.size() < static_cast<size_t>(pitch) * info.Height) return false;
-        outBgra.assign(static_cast<size_t>(outWidth) * outHeight * 4, 0);
-        for (UINT y = 0; y < outHeight; ++y) {
-            const uint8_t* andRow = &raw[static_cast<size_t>(y) * pitch];
-            const uint8_t* xorRow = &raw[static_cast<size_t>(y + outHeight) * pitch];
-            for (UINT x = 0; x < outWidth; ++x) {
-                const uint8_t bit = static_cast<uint8_t>(0x80 >> (x & 7));
-                const bool a = (andRow[x >> 3] & bit) != 0;
-                const bool b = (xorRow[x >> 3] & bit) != 0;
-                uint8_t* px = &outBgra[(static_cast<size_t>(y) * outWidth + x) * 4];
-                if (!a && !b) {           // opaque black
-                    px[0] = px[1] = px[2] = 0x00; px[3] = 0xFF;
-                } else if (!a && b) {     // opaque white
-                    px[0] = px[1] = px[2] = 0xFF; px[3] = 0xFF;
-                } else if (a && !b) {     // transparent
-                    px[0] = px[1] = px[2] = px[3] = 0x00;
-                } else {                  // screen invert - approximated as white
-                    px[0] = px[1] = px[2] = 0xFF; px[3] = 0xFF;
-                }
-            }
-        }
-        return true;
-    }
-
-    case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR: {
-        // 32bpp; the alpha byte is a mask: 0 = replace screen, 0xFF = XOR.
-        outWidth = info.Width;
-        outHeight = info.Height;
-        if (raw.size() < static_cast<size_t>(pitch) * outHeight) return false;
-        outBgra.assign(static_cast<size_t>(outWidth) * outHeight * 4, 0);
-        for (UINT y = 0; y < outHeight; ++y) {
-            const uint8_t* src = &raw[static_cast<size_t>(y) * pitch];
-            for (UINT x = 0; x < outWidth; ++x) {
-                const uint8_t* s = src + static_cast<size_t>(x) * 4;
-                uint8_t* px = &outBgra[(static_cast<size_t>(y) * outWidth + x) * 4];
-                if (s[3] == 0) {
-                    px[0] = s[0]; px[1] = s[1]; px[2] = s[2]; px[3] = 0xFF;
-                } else {
-                    // XOR-with-screen is approximated by inverting the colour.
-                    px[0] = static_cast<uint8_t>(~s[0]);
-                    px[1] = static_cast<uint8_t>(~s[1]);
-                    px[2] = static_cast<uint8_t>(~s[2]);
-                    px[3] = 0xFF;
-                }
-            }
-        }
-        return true;
-    }
-
-    default:
-        return false;
-    }
-}
-
 // Finds the DXGI output whose DeviceName matches, plus its adapter.
 bool ResolveOutput(const std::wstring& deviceName, ComPtr<IDXGIAdapter1>& adapter,
                    ComPtr<IDXGIOutput1>& output1, LUID& adapterLuid) {
@@ -120,10 +39,20 @@ bool ResolveOutput(const std::wstring& deviceName, ComPtr<IDXGIAdapter1>& adapte
     }
     for (UINT ai = 0;; ++ai) {
         ComPtr<IDXGIAdapter1> a;
-        if (factory->EnumAdapters1(ai, &a) == DXGI_ERROR_NOT_FOUND) break;
+        const HRESULT adapterResult = factory->EnumAdapters1(ai, &a);
+        if (adapterResult == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(adapterResult) || !a) {
+            DS_WARN(L"EnumAdapters1 failed: %s", HrString(adapterResult));
+            return false;
+        }
         for (UINT oi = 0;; ++oi) {
             ComPtr<IDXGIOutput> o;
-            if (a->EnumOutputs(oi, &o) == DXGI_ERROR_NOT_FOUND) break;
+            const HRESULT outputResult = a->EnumOutputs(oi, &o);
+            if (outputResult == DXGI_ERROR_NOT_FOUND) break;
+            if (FAILED(outputResult) || !o) {
+                DS_WARN(L"EnumOutputs failed: %s", HrString(outputResult));
+                return false;
+            }
             DXGI_OUTPUT_DESC od = {};
             if (FAILED(o->GetDesc(&od))) continue;
             if (::_wcsicmp(od.DeviceName, deviceName.c_str()) != 0) continue;
@@ -134,7 +63,7 @@ bool ResolveOutput(const std::wstring& deviceName, ComPtr<IDXGIAdapter1>& adapte
                 return false;
             }
             DXGI_ADAPTER_DESC1 ad = {};
-            a->GetDesc1(&ad);
+            if (FAILED(a->GetDesc1(&ad))) return false;
             adapter = a;
             output1 = o1;
             adapterLuid = ad.AdapterLuid;
@@ -390,7 +319,8 @@ void SegmentCapture::UpdatePointer(const DXGI_OUTDUPL_FRAME_INFO& info) {
     }
 
     UINT w = 0, h = 0;
-    if (!ConvertPointerShape(si, m_shapeBuffer, m_shapeBgra, w, h)) {
+    if (required > m_shapeBuffer.size()
+        || !ConvertPointerShape(si, std::span<const uint8_t>(m_shapeBuffer.data(), required), m_shapeBgra, w, h)) {
         DS_VERB(L"segment %zu: unsupported pointer shape type %u", m_index,
                 static_cast<unsigned>(si.Type));
         return;

@@ -228,8 +228,8 @@ on a virtual monitor is picked up automatically.
 | `PresenterSelect.h` | Pure presenter-selection policy + fallback reasons. Header-only so `tests/PresenterProbe.cpp` can unit-test every failure mode. |
 | `WindowPresenter.h/.cpp` | Flip-model DXGI swapchain on the borderless window (the default, unchanged path). |
 | `SpecializedPresenter.h/.cpp` | EXPERIMENTAL: `Windows.Devices.Display.Core` acquisition + scanout. See docs/HIDING.md. |
-| `CursorConfine.h/.cpp` | Exclusion-based cursor confinement: `WH_MOUSE_LL` edge-slide hook, plus `ClipCursor` only in the rare case where it can express the allowed area exactly. |
-| `WindowRescuer.h/.cpp` | `SetWinEventHook` watcher that relocates app windows opening behind the compositor onto the first virtual monitor. Runs on its own thread with its own pump. |
+| `CursorConfine.h/.cpp` | Physical-edge to capture-source pointer mapping with `WH_MOUSE_LL`; no global rectangular cursor clip. |
+| `WindowRescuer.h/.cpp` | `SetWinEventHook` watcher for covered/activated offscreen app windows; asynchronous placement across the complete split group. |
 
 ## Design notes
 
@@ -283,86 +283,35 @@ version counter tells the renderer when to rebuild the immutable cursor
 texture. The cursor is drawn as an alpha-blended quad on top of its segment,
 scaled by the same `physRect / captureSize` factor.
 
-**Cursor confinement is exclusion-based.** The rule is a single negative one:
-*the covered physical monitor's desktop rect is off limits, everything else is
-free*. There is deliberately no notion of an "allowed" region to stay inside.
+**Pointer topology.** Capture desktops are storage surfaces, not the physical
+monitor arrangement. `PointerTopology.h` maps crossings between the covered
+panel's visible outer edges and its real neighbours to the correct capture
+source. It reads the current nine-slot routing, so exchanging display numbers
+also updates the input mapping. Other real-to-real movement remains native.
+The control app places capture desktops clear of physical monitors; native
+crossings into those storage surfaces from unrelated real edges are blocked.
 
-The earlier inclusion-based design — `ClipCursor` to the bounding box of the
-virtual monitors, plus a hook that teleported strays to the nearest virtual
-point — breaks as soon as a second real monitor exists. A user with an HP
-monitor above the virtual row saw the cursor snap back on downward movement:
-that monitor lies outside the virtual bounding box, so the clip and the hook
-both fought to drag the cursor back into it. A single `ClipCursor` rectangle
-simply cannot describe "three virtual monitors in a row plus one real monitor
-above one of them, minus the covered one".
+No global `ClipCursor` rectangle is applied or periodically reasserted. An
+incomplete topology disables routing rather than trapping the pointer. Failed
+or externally clipped cursor warps pass input through. Monitor rectangles are
+refreshed on display changes and routing exchanges. The hook ignores its own
+warp notifications to avoid immediate back-and-forth crossings. `--no-confine`
+disables this mapping. Specialized presentation does not need the hook.
 
-So:
+**Window rescuer.** SHOW, MOVESIZEEND, LOCATIONCHANGE and FOREGROUND WinEvents
+identify ordinary windows hidden under the compositor. An initial scan handles
+existing covered windows. Foreground activation additionally handles completely
+offscreen windows and bypasses the background rate limit. Minimized, cloaked,
+shell, tool and protected windows are left alone; a window visible on another
+real monitor is not moved merely because it was activated.
 
-- **`ClipCursor` is dropped** unless the union of all *non-covered* monitors is
-  exactly one rectangle (`UnionIsSingleRect`, an exact area test because monitor
-  rects never overlap). With the physical monitor covered and other real
-  monitors free to sit above or below the virtual row, it almost never is. In
-  hook-only mode dscomp never calls `ClipCursor` at all, so it cannot fight
-  another app's clip, and it only calls `ClipCursor(NULL)` on exit if it was the
-  one that set a clip.
-- **The `WH_MOUSE_LL` hook is the sole mechanism.** It blocks only non-injected
-  `WM_MOUSEMOVE` events whose *destination* lies inside the covered rect.
-  Everything else — virtual monitors, the HP, movement between them in any
-  direction — passes straight through untouched.
-- **Blocked moves slide along the edge.** Entering a rectangle means crossing
-  both its slabs, and the wall you actually hit is the one crossed *last*
-  (`SlideAlongEdge` compares the parametric crossing times and clamps the axis
-  with the larger `t`). Only that axis is clamped to just outside the rect; the
-  other keeps the value the movement asked for. Skimming past the covered
-  monitor therefore feels like a normal screen edge instead of a snap-back, and
-  a diagonal that clips a corner exits through the edge it genuinely reached.
-  The hook tracks its own last-allowed point rather than calling
-  `GetCursorPos`, so the approach direction is always known.
-- **Degenerate cases.** If a slide lands in a gap between non-flush monitors,
-  the hook falls back to holding the other axis, then to the approach point. If
-  the cursor is somehow already inside the covered rect (startup, or an app
-  calling `SetCursorPos`), there is no approach direction to preserve, so it
-  exits through the nearest edge — the only teleport left in the design, and
-  only as recovery.
-- **If the hook cannot be installed**, dscomp logs a warning and runs with no
-  confinement at all rather than degrading movement with a clip that does not
-  match reality.
-
-The covered rect is resolved fresh from `EnumDisplayMonitors` and re-resolved on
-`WM_DISPLAYCHANGE`: the control app makes segment 1's virtual monitor the
-Windows *primary* during Apply, which re-bases virtual-desktop coordinates and
-can leave the physical monitor at negative coordinates. Nothing is cached across
-a display change. `--no-confine` disables all of this.
-
-**Window rescuer.** Windows that open or are restored inside the covered region
-are invisible under the compositor, so a watcher moves them out. Three
-out-of-context `SetWinEventHook`s — `EVENT_OBJECT_SHOW`,
-`EVENT_SYSTEM_MOVESIZEEND` and `EVENT_OBJECT_LOCATIONCHANGE` — feed a filter
-that requires the window to be top-level (`GA_ROOT`), visible, not `WS_CHILD`,
-not `WS_EX_TOOLWINDOW`, not `WS_EX_NOACTIVATE`, not DWM-cloaked
-(`DWMWA_CLOAKED`), at least 100×50, and **≥50% inside the covered rect** by
-area. Shell and flyout classes (`Progman`, `WorkerW`, `Shell_TrayWnd`, menus,
-tooltips, XAML popups, …) and flyout/logon host processes (`winlogon.exe`,
-`LogonUI.exe`, `ShellExperienceHost.exe`, `StartMenuExperienceHost.exe`,
-`SearchHost.exe`, `TextInputHost.exe`) are excluded outright, as is our own
-process (`WINEVENT_SKIPOWNPROCESS` plus an explicit PID check).
-
-Survivors are moved into the **work area of segment 1's virtual monitor**
-(`config.segments[0].virtualDevice`, resolved fresh at rescue time), keeping
-their size when it fits and otherwise shrinking to the work area, then centred
-and clamped. Maximized windows cannot be moved, so they are `SW_RESTORE`d,
-positioned, and `SW_MAXIMIZE`d again — which maximizes them onto whichever
-monitor they now sit on. `EVENT_OBJECT_LOCATIONCHANGE` is debounced with a
-300 ms coalescing timer (and filtered to `OBJID_WINDOW`/`CHILDID_SELF`, without
-which it would fire for every caret and cursor movement), and each `HWND` is
-rescued at most once per 5 s so dscomp never ping-pongs with an app that
-repositions itself. Rescues are logged under `--verbose`. `--no-rescue`
-disables it.
-
-The rescuer runs on **its own thread with its own message pump**, not the UI
-thread. Relocating another process's window is a cross-process `SetWindowPos`
-that can block on a hung app, and the UI thread also services the `WH_MOUSE_LL`
-confinement hook — stalling it would stall system-wide mouse input.
+Placement uses the bounding work area of the entire split group, preserving a
+normal window large enough to span several tiles instead of shrinking it into
+slot 1. Maximized windows retain Windows' per-monitor maximize behavior.
+`SetWindowPlacement` uses workspace coordinates and asynchronous placement to
+avoid waiting for a hung foreign UI thread. The worker keeps its own message
+pump. Existing location-change coalescing/rate limits remain for background
+events. `--no-rescue` disables the watcher.
 
 ## Known runtime risks
 

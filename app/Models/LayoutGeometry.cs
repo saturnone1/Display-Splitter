@@ -14,8 +14,9 @@ public readonly record struct ZoneRect(double X, double Y, double W, double H);
 /// </summary>
 public static class LayoutGeometry
 {
-    public const int MinSegmentDimension = 640;
-    public const int MaxSegmentDimension = 7680;
+    public const int MinSegmentDimension = 1;
+    // D3D11 texture dimension limit, not an arbitrary layout policy.
+    public const int MaxSegmentDimension = 16384;
 
     /// <summary>Column widths / row heights in monitor pixels, derived from the segment sizes.</summary>
     public sealed record Tracks(int[] ColumnWidths, int[] RowHeights);
@@ -117,6 +118,7 @@ public static class LayoutGeometry
         LayoutDefinition layout, int monitorWidth, int monitorHeight,
         IReadOnlyList<(int Width, int Height)> sizes)
     {
+        if (layout.IsCustom) return layout.ComputePhysRects(monitorWidth, monitorHeight);
         Tracks tracks = ComputeTracks(layout, sizes);
         int[] cols = Normalize(tracks.ColumnWidths, monitorWidth);
         int[] rows = Normalize(tracks.RowHeights, monitorHeight);
@@ -143,6 +145,8 @@ public static class LayoutGeometry
         LayoutDefinition layout, double canvasWidth, double canvasHeight,
         IReadOnlyList<(int Width, int Height)> sizes)
     {
+        if (layout.IsCustom) return layout.Cells.Select(c => new ZoneRect(c.Fx * canvasWidth, c.Fy * canvasHeight,
+            c.Fw * canvasWidth, c.Fh * canvasHeight)).ToArray();
         Tracks tracks = ComputeTracks(layout, sizes);
         double[] colEdges = FractionEdges(tracks.ColumnWidths, canvasWidth);
         double[] rowEdges = FractionEdges(tracks.RowHeights, canvasHeight);
@@ -184,8 +188,7 @@ public static class LayoutGeometry
         int lower = Math.Max(MinSegmentDimension, pairTotal - MaxSegmentDimension);
         int upper = Math.Min(MaxSegmentDimension, pairTotal - MinSegmentDimension);
 
-        // A pair total below 2 * min cannot satisfy both; split it as evenly as possible.
-        if (upper < lower) return pairTotal / 2;
+        if (upper < lower) throw new ArgumentOutOfRangeException(nameof(pairTotal), "두 칸을 양수 크기로 나누거나 GPU 텍스처 범위 안에 배치할 수 없습니다.");
 
         return Math.Clamp(proposedLeading, lower, upper);
     }

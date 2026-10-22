@@ -25,3 +25,15 @@ foreach ($file in $files) {
     }
     Write-Host "PASS $file : no external VC++ redistributable dependency"
 }
+
+# Check the actual published PE, not just the MSBuild property: single-file
+# publishing uses a different host from the ordinary build output.
+$managedHost = Join-Path $repoRoot 'installer\setup\payload\DesktopSplitter.exe'
+if (Test-Path -LiteralPath $managedHost) {
+    $headers = & $dumpbin /nologo /headers $managedHost 2>&1
+    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the published managed host' }
+    if ($headers -match 'CET compatible') {
+        throw 'Published .NET host enables CET and can abort before Main on early Windows 10 21H2. Publish with CETCompat=false.'
+    }
+    Write-Host 'PASS published .NET host: no CET requirement on early Windows 10 21H2'
+}

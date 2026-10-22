@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\build\generated\Version.props" Condition="Exists('..\build\generated\Version.props')" />
+  <PropertyGroup>
+    <DeskSplitVersion Condition="'$(DeskSplitVersion)' == ''">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\VERSION')), '(?m)^[0-9]+\.[0-9]+\.[0-9]+\s*$').Value.Trim())</DeskSplitVersion>
+    <DeskSplitDriverVersion>$(DeskSplitVersion).0</DeskSplitDriverVersion>
+  </PropertyGroup>
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
@@ -32,7 +37,13 @@
     <ClInclude Include="..\shared\DeskSplitProtocol.h" />
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="DesktopSplitterVdd.inf" />
+    <Inf Include="DesktopSplitterVdd.inf">
+      <!-- WDK's default '*' stamps the wall-clock time as a.b.c.d. Use the
+           product version instead: clock-stamped packages stalled IddCx on
+           Win10 21H2, while the identical DLL with explicit versions worked. -->
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+      <TimeStamp>$(DeskSplitDriverVersion)</TimeStamp>
+    </Inf>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{6F1B2C48-9D2E-4E5A-9C71-1A4E5B7D3F02}</ProjectGuid>

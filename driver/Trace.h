@@ -28,6 +28,7 @@ inline void DeskSplitTraceImpl(_In_z_ const char* Level, _In_z_ _Printf_format_s
 
     _snprintf_s(Line, sizeof(Line), _TRUNCATE, "[DesktopSplitterVdd] %s: %s\n", Level, Body);
     OutputDebugStringA(Line);
+
 #else
     UNREFERENCED_PARAMETER(Level);
     UNREFERENCED_PARAMETER(Format);

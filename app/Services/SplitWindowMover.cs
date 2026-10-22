@@ -77,7 +77,7 @@ public static class SplitWindowMover
     public static MonitorArea ReadWindowArea(nint window) => ReadArea(MonitorFromWindow(window, 2));
     public static string MoveTo(int number)
     {
-        if (number is < 1 or > 4) return "화면 번호는 1~4만 사용할 수 있습니다.";
+        if (number is < 1 or > 9) return "화면 번호는 1~9만 사용할 수 있습니다.";
         return MoveCore(number);
     }
 

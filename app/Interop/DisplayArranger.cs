@@ -52,6 +52,14 @@ public static class DisplayArranger
             throw new DisplayArrangeException(
                 $"Expected {layout.SegmentCount} segment resolutions, got {resolutions.Count}.");
 
+        if (layout.IsCustom) {
+            var rects = layout.ComputePhysRects(physical.CurrentWidth, physical.CurrentHeight);
+            if (!resolutions.SequenceEqual(rects.Select(r => (r.W, r.H))))
+                throw new DisplayArrangeException("자유 분할의 모니터 크기가 편집한 영역과 다릅니다.");
+            return rects.Select((r, i) => new VirtualPlacement(virtualMonitors[i].DeviceName, r.W, r.H,
+                checked(physical.PositionX + physical.CurrentWidth + r.X), checked(physical.PositionY + r.Y), i, 0)).ToArray();
+        }
+
         LayoutGeometry.Tracks tracks = LayoutGeometry.ComputeTracks(layout, resolutions);
         int[] colWidth = tracks.ColumnWidths;
         int[] rowHeight = tracks.RowHeights;
@@ -89,6 +97,7 @@ public static class DisplayArranger
         int virtualRefreshHz,
         string primaryDevice)
     {
+        placements = PlaceInFreeDesktopArea(current, placements);
         var byName = placements.ToDictionary(p => p.DeviceName, StringComparer.OrdinalIgnoreCase);
 
         var layout = current
@@ -101,6 +110,22 @@ public static class DisplayArranger
             .Select(v => new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false)));
 
         return RebaseToPrimary(layout, primaryDevice);
+    }
+
+    /// <summary>Keep capture desktops clear of existing physical monitors, preserving all relative slot geometry.</summary>
+    public static IReadOnlyList<VirtualPlacement> PlaceInFreeDesktopArea(
+        IReadOnlyList<MonitorInfo> current, IReadOnlyList<VirtualPlacement> placements)
+    {
+        var physical = current.Where(monitor => !monitor.IsDeskSplitVirtual).ToArray();
+        if (placements.Count == 0 || !placements.Any(slot => physical.Any(monitor =>
+            slot.X < (long)monitor.PositionX + monitor.CurrentWidth && (long)slot.X + slot.Width > monitor.PositionX
+            && slot.Y < (long)monitor.PositionY + monitor.CurrentHeight && (long)slot.Y + slot.Height > monitor.PositionY))) return placements;
+        // The one-pixel separation prevents an unrelated native desktop edge
+        // from becoming the visible split's neighbour. The compositor maps the
+        // physical edges to the correct capture source instead.
+        long right = physical.Max(monitor => (long)monitor.PositionX + monitor.CurrentWidth);
+        int delta = checked((int)(right + 1 - placements.Min(slot => slot.X)));
+        return placements.Select(slot => slot with { X = checked(slot.X + delta) }).ToArray();
     }
 
     // ------------------------------------------------------------------ primary switching

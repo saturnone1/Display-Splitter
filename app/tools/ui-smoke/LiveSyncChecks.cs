@@ -22,7 +22,6 @@ internal static class LiveSyncChecks
         var window = new DesktopSplitter.MainWindow(view, null);
         var apply = (System.Windows.Controls.Primitives.ButtonBase)window.FindName("ApplyButton");
         var revert = (System.Windows.Controls.Primitives.ButtonBase)window.FindName("RevertButton");
-        var liveRows = (System.Windows.Controls.ItemsControl)window.FindName("LiveSlotsList");
         var choice = (System.Windows.Controls.ComboBox)window.FindName("MatrixPrimaryChoice");
         var issues = new List<string>();
         void AssertUi(string name) {
@@ -38,8 +37,16 @@ internal static class LiveSyncChecks
         Task Press(ShortcutAction action) {
             var previous = SynchronizationContext.Current;
             SynchronizationContext.SetSynchronizationContext(null);
-            try { return (Task)process.Invoke(window, new object[] { action })!; }
+            Task pending;
+            try { pending = (Task)process.Invoke(window, new object[] { action })!; }
             finally { SynchronizationContext.SetSynchronizationContext(previous); }
+            return AwaitBindings(pending);
+        }
+        async Task AwaitBindings(Task pending) {
+            await pending.ConfigureAwait(false);
+            // DispatcherFrame exits at Normal priority. WPF's queued DataBind work is lower
+            // priority, so await the real binding phase before inspecting an unshown ComboBox.
+            await app.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render).Task.ConfigureAwait(false);
         }
         void Enabled() {
             window.UpdateLayout();
@@ -51,7 +58,7 @@ internal static class LiveSyncChecks
         Program.CompleteOnDispatcher(Press(ShortcutAction.Primary3));
         Check(view.SelectedPrimarySlot == 3 && view.Zones.Single(zone => zone.IsPrimary).Number == 3
             && view.CurrentSlots.Single(text => text.Contains("선택됨")).StartsWith("칸 3")
-            && Equals(choice.SelectedItem, 3), "Selection shortcut left stale UI state");
+            && Equals(choice.SelectedItem, 3), $"Selection shortcut left stale UI state: selected={view.SelectedPrimarySlot}, badge={string.Join(',', view.Zones.Where(zone => zone.IsPrimary).Select(zone => zone.Number))}, combo={choice.SelectedItem}, rows={string.Join(';', view.CurrentSlots)}, log={view.StatusText}");
         Enabled();
         // A dropdown is a pending choice; the live badge/settings change only after Select succeeds.
         Program.CompleteOnDispatcher(app.Dispatcher.InvokeAsync(() => view.SelectedPrimarySlot = 2).Task);
@@ -66,12 +73,13 @@ internal static class LiveSyncChecks
         Program.CompleteOnDispatcher(app.Dispatcher.InvokeAsync(() => view.SelectedPrimarySlot = 3).Task);
         Enabled();
         var segmentObjects = view.Segments.ToArray();
-        int monitorChanges = 0, segmentChanges = 0, rowChanges = 0;
+        int monitorChanges = 0, segmentChanges = 0, rowChanges = 0, optionChanges = 0;
         view.Monitors.CollectionChanged += (_, _) => monitorChanges++;
         view.Segments.CollectionChanged += (_, _) => segmentChanges++;
         view.CurrentSlots.CollectionChanged += (_, _) => rowChanges++;
+        view.PrimaryChoices.CollectionChanged += (_, _) => optionChanges++;
         for (int i = 0; i < 10; i++) Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
-        Check(monitorChanges == 0 && segmentChanges == 0 && rowChanges == 0 && view.Segments.SequenceEqual(segmentObjects),
+        Check(monitorChanges == 0 && segmentChanges == 0 && rowChanges == 0 && optionChanges == 0 && view.Segments.SequenceEqual(segmentObjects),
             "Unchanged snapshots rebuilt bound collections/editor objects");
         Program.CompleteOnDispatcher(app.Dispatcher.InvokeAsync(() => view.Segments[0].WidthText = "12x").Task);
         Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
@@ -80,11 +88,11 @@ internal static class LiveSyncChecks
         Program.CompleteOnDispatcher(app.Dispatcher.InvokeAsync(() => view.Segments[0].WidthText = expectedSizes[0].Width.ToString()).Task);
         Program.CompleteOnDispatcher(Press(ShortcutAction.Arrange4));
         Check(view.CurrentSlots[3].Contains("화면 1") && view.CurrentSlots[0].Contains("화면 4")
-            && view.CurrentSlots[2].Contains("선택됨") && liveRows.Items.Count == 4
-            && liveRows.Items[3].ToString()!.Contains("화면 1"), "Swap shortcut left old routing or changed selection position");
+            && view.CurrentSlots[2].Contains("선택됨") && view.CurrentSlots.Count == 4
+            && view.CurrentSlots[3].Contains("화면 1"), "Swap shortcut left old routing or changed selection position");
         Enabled();
         Program.CompleteOnDispatcher(Press(ShortcutAction.Revert));
-        Check(view.IsOriginalScreen && view.CurrentSlots.Count == 0 && liveRows.Items.Count == 0 && !view.IsSplitEditorExpanded
+        Check(view.IsOriginalScreen && view.CurrentSlots.Count == 0 && view.CurrentSlots.Count == 0
             && view.Zones.All(zone => !zone.IsPrimary), "Revert shortcut left the UI split");
         Enabled();
         fake.FailRevert = true;
@@ -134,10 +142,51 @@ internal static class LiveSyncChecks
         Check(view.IsActiveMatrix && view.SelectedPrimarySlot == 1 && view.CurrentSlots[0].Contains("선택됨"),
             "A later split/selection stayed locked after merge or cancellation");
         Enabled();
+        int beforeMissing = fake.SelectionCalls;
+        Program.CompleteOnDispatcher(Press(ShortcutAction.Primary9));
+        Check(fake.SelectionCalls == beforeMissing && view.StatusText.Contains("9번이 없습니다"), "Missing-slot shortcut invoked a desktop action");
+        fake.Snapshot = fake.Snapshot with { ActiveVirtualCount=9, ActiveGroupLayout=LayoutKind.Grid3x3,
+            ActiveTargets=Enumerable.Range(1,9).Select(i=>new SplitTarget(i,$"V{i}",new(0,0,640,360),new(0,0,640,360),i)).ToArray() };
+        Program.CompleteOnDispatcher(app.Dispatcher.InvokeAsync(() => view.SelectedLayout = LayoutDefinition.FromKind(LayoutKind.Grid3x3)).Task);
+        Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
+        foreach(var action in ShortcutSettings.Actions.Where(action=>ShortcutSettings.PrimaryNumber(action) is >=5)) {
+            int slot=ShortcutSettings.PrimaryNumber(action)!.Value;
+            Program.CompleteOnDispatcher(Press(action));
+            Check(view.SelectedPrimarySlot==slot && fake.Snapshot.SelectedSlot==slot
+                && view.Zones.Single(zone=>zone.IsPrimary).Number==slot && Equals(choice.SelectedItem,slot), "Extended selection shortcut failed to update UI");
+        }
+        foreach(var action in ShortcutSettings.Actions.Where(action=>ShortcutSettings.ArrangementNumber(action) is >=5)) {
+            int slot=ShortcutSettings.ArrangementNumber(action)!.Value;
+            Program.CompleteOnDispatcher(Press(action));
+            Check(fake.Snapshot.ActiveTargets![slot-1].DeviceName=="V1" && !view.IsBusy, "Extended arrangement shortcut did not reach the desktop pipeline");
+        }
+        fake.Snapshot=fake.Snapshot with {ActiveVirtualCount=4,ActiveGroupLayout=LayoutKind.Grid2x2,SelectedSlot=4,
+            ActiveTargets=Enumerable.Range(1,4).Select(i=>new SplitTarget(i,$"V{i}",new(0,0,1280,720),new(0,0,1280,720),i)).ToArray()};
+        Program.CompleteOnDispatcher(app.Dispatcher.InvokeAsync(()=>view.SelectedLayout=LayoutDefinition.FromKind(LayoutKind.Grid2x2)).Task);
+        Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
+        int choicesBeforeShrink=fake.SelectionCalls;
+        Program.CompleteOnDispatcher(Press(ShortcutAction.Primary9));
+        Check(view.SelectedPrimarySlot==4 && Equals(choice.SelectedItem,4) && fake.SelectionCalls==choicesBeforeShrink
+            && view.PrimaryChoices.SequenceEqual(Enumerable.Range(1,4)) && view.CurrentSlots.Count==4 && !view.IsBusy, "Shrinking nine slots left an out-of-range selection or locked UI");
+        var verifiedSnapshot=fake.Snapshot;
+        fake.Snapshot=fake.Snapshot with {ActiveTargets=Array.Empty<SplitTarget>(),RoutingIssue="fixture routing unavailable"};
+        Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
+        int beforeUnknown=fake.SelectionCalls;
+        Program.CompleteOnDispatcher(Press(ShortcutAction.Primary1));
+        Check(!view.IsActiveMatrix && view.PrimaryChoices.Count==0 && !view.SetPrimaryCommand.CanExecute(null)
+            && fake.SelectionCalls==beforeUnknown && view.Zones.All(zone=>!zone.IsPrimary), "Unknown routing still enabled selection or displayed an authoritative selected badge");
+        fake.Snapshot=verifiedSnapshot;
+        Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
+        Check(view.IsActiveMatrix && view.PrimaryChoices.Count==4, "Recovered routing did not unlock selection");
+        fake.Snapshot=verifiedSnapshot with {ActiveTargets=verifiedSnapshot.ActiveTargets!.Select(target=>target with {DeviceName="DUPLICATE"}).ToArray()};
+        Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
+        Check(!view.IsActiveMatrix && view.PrimaryChoices.Count==0, "Duplicate device snapshot still enabled selection");
+        fake.Snapshot=verifiedSnapshot;
+        Program.CompleteOnDispatcher(view.RefreshMonitorsAsync());
         Check(issues.Count == 0, "UI notifications escaped WPF context: " + string.Join(", ", issues.Distinct()));
         Check(before == (File.Exists(SettingsStore.FilePath) ? File.ReadAllText(SettingsStore.FilePath) : null), "Live sync fixture changed user settings");
         window.Close();
-        Console.WriteLine("PASS live sync: actual shortcut entry, committed vs pending choice, failure/cancellation unlock, monitor loss/reconnect/renumbering, partial input preservation, single completion read; 10 equal snapshots produced 0 monitor/segment/live-row mutations. Fake desktop only; no real keys/windows/displays changed.");
+        Console.WriteLine("PASS live sync: actual shortcut entry for slots 5..9, missing-slot rejection, committed vs pending choice, failure/cancellation unlock, monitor loss/reconnect/renumbering, partial input preservation, single completion read; 10 equal snapshots produced 0 monitor/segment/live-row mutations. Fake desktop only; no real keys/windows/displays changed.");
     }
 
     private sealed class FakeDesktop : IDesktopActions

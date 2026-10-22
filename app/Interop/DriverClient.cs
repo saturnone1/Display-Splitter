@@ -56,15 +56,23 @@ public struct DESKSPLIT_STATUS
     public uint ActiveMonitorCount;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct DESKSPLIT_DIAGNOSTICS
+{
+    public uint Version;
+    public uint AdapterState;
+    public int AdapterInitStatus;
+}
+
 /// <summary>
 /// Opens the driver's device interface and issues IOCTL_DESKSPLIT_SET_CONFIG /
 /// IOCTL_DESKSPLIT_GET_STATUS.
 /// </summary>
 public static class DriverClient
 {
-    public const int DESKSPLIT_MAX_MONITORS = 4;
+    public const int DESKSPLIT_MAX_MONITORS = 9;
     public const int DESKSPLIT_MAX_MODES = 8;
-    public const uint DESKSPLIT_PROTOCOL_VERSION = 1;
+    public const uint DESKSPLIT_PROTOCOL_VERSION = 3;
 
     /// <summary>{8E7A9B21-4C55-4C83-9B2E-7D3A1F60D2AD}</summary>
     public static readonly Guid GUID_DEVINTERFACE_DESKSPLIT =
@@ -86,9 +94,37 @@ public static class DriverClient
     /// <summary>0x00222404</summary>
     public static readonly uint IOCTL_DESKSPLIT_GET_STATUS =
         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_ANY_ACCESS);
+    public static readonly uint IOCTL_DESKSPLIT_GET_DIAGNOSTICS =
+        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+    public static string? AdapterFailureMessage(DESKSPLIT_DIAGNOSTICS? diagnostic)
+        => diagnostic is { Version: 1, AdapterState: 3 } failure
+            ? $"드라이버 검색·통신은 성공했지만 가상 디스플레이 어댑터 초기화가 실패했습니다 (NTSTATUS 0x{unchecked((uint)failure.AdapterInitStatus):X8}). 그래픽 장치·드라이버의 지원 상태를 확인해 주세요."
+            : null;
+
+    public static string? AdapterUnavailableMessage(DESKSPLIT_DIAGNOSTICS? diagnostic)
+        => AdapterFailureMessage(diagnostic) ?? (diagnostic is { AdapterState: 0 or 1 }
+            ? "가상 디스플레이 어댑터를 초기화하고 있습니다. 준비가 완료된 후 다시 적용해 주세요." : null);
+
+    public static DESKSPLIT_DIAGNOSTICS? ReadDiagnostics(SafeFileHandle handle)
+    {
+        int size = Marshal.SizeOf<DESKSPLIT_DIAGNOSTICS>();
+        nint buffer = Marshal.AllocHGlobal(size);
+        try {
+            if (!DeviceIoControl(handle, IOCTL_DESKSPLIT_GET_DIAGNOSTICS, 0, 0, buffer, (uint)size, out uint returned, 0)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error is 1 or 50) return null; // Optional query is absent on an earlier v2 driver.
+                throw new DriverIoException($"드라이버 초기화 상태 조회 실패: {new Win32Exception(error).Message} (Win32 {error}).");
+            }
+            if (returned != size) throw new DriverIoException("드라이버 초기화 상태 응답의 크기가 올바르지 않습니다.");
+            var diagnostic = Marshal.PtrToStructure<DESKSPLIT_DIAGNOSTICS>(buffer);
+            if (diagnostic.Version != 1 || diagnostic.AdapterState > 3) throw new DriverIoException("드라이버 초기화 상태 응답의 버전 또는 상태가 올바르지 않습니다.");
+            return diagnostic;
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
 
     public const string DriverMissingMessage =
-        "가상 디스플레이 드라이버가 설치되어 있지 않거나 장치가 연결되지 않았습니다. 레이아웃 편집은 가능하지만 실제 분할에는 드라이버를 별도로 설치해야 합니다.";
+        "활성 가상 디스플레이 드라이버 인터페이스를 찾지 못했습니다. 미설치뿐 아니라 장치 사용 안 함·서명 또는 로드 실패일 수 있습니다. 설치 프로그램과 장치 관리자에서 드라이버 상태를 확인해 주세요.";
 
     /// <summary>Builds an all-zero-but-valid config with room for the fixed arrays.</summary>
     public static DESKSPLIT_CONFIG NewConfig()
@@ -117,51 +153,41 @@ public static class DriverClient
     /// <summary>Device interface path, or throws <see cref="DriverNotFoundException"/>.</summary>
     public static string GetDevicePath()
     {
-        if (!TryFindDevicePath(out string path))
-            throw new DriverNotFoundException(DriverMissingMessage);
-        return path;
+        using var connection = Connect();
+        return connection.Path;
     }
 
     public static bool TryFindDevicePath(out string devicePath)
     {
-        devicePath = string.Empty;
-        Guid guid = GUID_DEVINTERFACE_DESKSPLIT;
+        devicePath = DriverInterfaceDiscovery.Enumerate().FirstOrDefault() ?? "";
+        return devicePath.Length > 0;
+    }
 
-        int cr = CM_Get_Device_Interface_List_Size(
-            out uint len, ref guid, IntPtr.Zero, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
-        if (cr != CR_SUCCESS || len < 2) return false;
-
-        var buffer = new char[len];
-        cr = CM_Get_Device_Interface_List(
-            ref guid, IntPtr.Zero, buffer, len, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
-        if (cr != CR_SUCCESS) return false;
-
-        foreach (string s in SplitMultiSz(buffer))
-        {
-            if (!string.IsNullOrWhiteSpace(s))
-            {
-                devicePath = s;
-                return true;
-            }
-        }
-        return false;
+    public static DriverConnection<SafeFileHandle> Connect(CancellationToken ct = default)
+    {
+        try { return DriverDeviceConnector.Connect(DriverInterfaceDiscovery.Enumerate(ct), OpenPath, ReadStatus, ct); }
+        catch (DriverNotFoundException error) { throw new DriverNotFoundException(error.Message + " " + DriverDeviceDiagnostics.Describe()); }
     }
 
     /// <summary>Sends IOCTL_DESKSPLIT_SET_CONFIG.</summary>
-    public static void SetConfig(DESKSPLIT_CONFIG config)
+    public static void SetConfig(DESKSPLIT_CONFIG config, CancellationToken ct = default)
     {
         if (config.Monitors is null || config.Monitors.Length != DESKSPLIT_MAX_MONITORS)
-            throw new DriverIoException("DESKSPLIT_CONFIG.Monitors must be a fixed array of 4 entries.");
+            throw new DriverIoException("DESKSPLIT_CONFIG.Monitors must match DESKSPLIT_MAX_MONITORS.");
         if (config.MonitorCount > DESKSPLIT_MAX_MONITORS)
             throw new DriverIoException($"MonitorCount {config.MonitorCount} exceeds DESKSPLIT_MAX_MONITORS.");
 
-        using SafeFileHandle handle = OpenDevice();
+        using var connection = Connect(ct);
+        SafeFileHandle handle = connection.Handle;
+        if (config.MonitorCount > 0 && AdapterUnavailableMessage(ReadDiagnostics(handle)) is { } failure)
+            throw new DriverIoException(failure);
 
         int size = Marshal.SizeOf<DESKSPLIT_CONFIG>();
         IntPtr buffer = Marshal.AllocHGlobal(size);
         try
         {
             Marshal.StructureToPtr(config, buffer, false);
+            ct.ThrowIfCancellationRequested(); // Last cancellable boundary before the mutating IOCTL.
             bool ok = DeviceIoControl(handle, IOCTL_DESKSPLIT_SET_CONFIG,
                                       buffer, (uint)size, IntPtr.Zero, 0,
                                       out _, IntPtr.Zero);
@@ -180,10 +206,14 @@ public static class DriverClient
     }
 
     /// <summary>Sends IOCTL_DESKSPLIT_GET_STATUS.</summary>
-    public static DESKSPLIT_STATUS GetStatus()
+    public static DESKSPLIT_STATUS GetStatus(CancellationToken ct = default)
     {
-        using SafeFileHandle handle = OpenDevice();
+        using var connection = Connect(ct);
+        return connection.Status;
+    }
 
+    private static DESKSPLIT_STATUS ReadStatus(SafeFileHandle handle)
+    {
         int size = Marshal.SizeOf<DESKSPLIT_STATUS>();
         IntPtr buffer = Marshal.AllocHGlobal(size);
         try
@@ -209,16 +239,15 @@ public static class DriverClient
     }
 
     /// <summary>Convenience: SET_CONFIG with MonitorCount = 0 (removes all virtual monitors).</summary>
-    public static void ClearConfig()
+    public static void ClearConfig(CancellationToken ct = default)
     {
         DESKSPLIT_CONFIG cfg = NewConfig();
         cfg.MonitorCount = 0;
-        SetConfig(cfg);
+        SetConfig(cfg, ct);
     }
 
-    private static SafeFileHandle OpenDevice()
+    private static SafeFileHandle OpenPath(string path)
     {
-        string path = GetDevicePath();
         SafeFileHandle handle = CreateFile(
             path,
             GENERIC_READ | GENERIC_WRITE,
@@ -237,32 +266,6 @@ public static class DriverClient
         }
         return handle;
     }
-
-    private static IEnumerable<string> SplitMultiSz(char[] buffer)
-    {
-        int start = 0;
-        for (int i = 0; i < buffer.Length; i++)
-        {
-            if (buffer[i] != '\0') continue;
-            if (i > start) yield return new string(buffer, start, i - start);
-            start = i + 1;
-            if (start < buffer.Length && buffer[start] == '\0') yield break;   // terminating empty string
-        }
-    }
-
-    // ------------------------------------------------------------------ P/Invoke
-
-    private const int CR_SUCCESS = 0;
-    private const uint CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0x00000001;
-
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, EntryPoint = "CM_Get_Device_Interface_List_SizeW")]
-    private static extern int CM_Get_Device_Interface_List_Size(
-        out uint pulLen, ref Guid interfaceClassGuid, IntPtr pDeviceID, uint ulFlags);
-
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, EntryPoint = "CM_Get_Device_Interface_ListW")]
-    private static extern int CM_Get_Device_Interface_List(
-        ref Guid interfaceClassGuid, IntPtr pDeviceID,
-        [Out] char[] buffer, uint bufferLen, uint ulFlags);
 
     private const uint GENERIC_READ = 0x80000000;
     private const uint GENERIC_WRITE = 0x40000000;

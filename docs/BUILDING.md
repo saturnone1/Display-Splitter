@@ -622,10 +622,27 @@ signing** via the Hardware Dev Center:
 2. Package `DesktopSplitterVdd.inf/.dll/.cat` into a `.cab`, sign the cab with
    the EV certificate.
 3. Submit on the hardware dashboard, select **attestation signing** and the
-   target Windows versions (Windows 10 1809+ / Windows 11 x64).
+   target Windows versions (Windows 10 21H2 / Windows 11 x64).
 4. Download the Microsoft-signed package and ship it; `pnputil /add-driver`
    then works everywhere with no cert or boot-config changes.
 
 Attestation signing requires the driver to pass the "Universal" signability
 checks — this build already does (verified in the build output). Full WHQL
 (HLK testing) is only needed for Windows Update distribution.
+
+## Driver version metadata
+
+The driver project imports the generated product version and explicitly sets
+StampInf's version to `$(DeskSplitVersion).0`. Do not restore the WDK `*`
+wall-clock default. In Windows 10 21H2 VM A/B tests, the identical DLL stayed
+pending with INF version 23.24.9.1 but initialized with 0.38.43.63. A v3 package
+with 0.38.43.65 then passed creation/clearing of nine monitors. This observation
+does not establish the OS's internal cause or validate the final 0.5.6.0 package.
+`tools/Test-Win10DriverInf.ps1` guards the stamped INF against accidental drift.
+
+The native installer uses `DIIRFLAG_FORCE_INF` for its bundled package, so a
+legacy clock-version driver cannot outrank the explicitly selected installer
+and leave an obsolete wire protocol bound. This applies only to devices matching
+the bundled INF; it is an installer action, never a startup action. See the
+[Microsoft API contract](https://learn.microsoft.com/en-us/windows/win32/api/newdev/nf-newdev-diinstalldriverw).
+The legacy-to-product-version upgrade still requires guest execution validation.

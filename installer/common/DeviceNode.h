@@ -25,9 +25,18 @@ namespace DeskSplit
         bool    HasStatus;      // false if CM_Get_DevNode_Status failed
     };
 
-    // Number of device nodes under the ROOT enumerator carrying HardwareId.
+    // Number of present device nodes under ROOT carrying HardwareId.
     // Returns -1 if the enumeration itself failed.
     int CountDeviceNodes(_In_z_ const wchar_t* HardwareId);
+
+    constexpr bool IsStartedDevice(bool HasStatus, ULONG Status, ULONG Problem) noexcept
+    {
+        return HasStatus && Problem == 0 && (Status & DN_STARTED) != 0;
+    }
+    static_assert(IsStartedDevice(true, DN_STARTED, 0));
+    static_assert(!IsStartedDevice(false, DN_STARTED, 0));
+    static_assert(!IsStartedDevice(true, 0, 0));
+    static_assert(!IsStartedDevice(true, DN_STARTED, CM_PROB_FAILED_START));
 
     // Finds the first present node carrying HardwareId and fills pInfo
     // (including its CM_Get_DevNode_Status result). Returns false if no node

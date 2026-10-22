@@ -14,10 +14,11 @@
 #include "DeskSplitProtocol.h"
 
 // Mode sanity limits enforced on IOCTL_DESKSPLIT_SET_CONFIG.
-#define DESKSPLIT_MIN_DIMENSION     640u
-#define DESKSPLIT_MAX_DIMENSION     7680u
-#define DESKSPLIT_MIN_REFRESH_MHZ   23000u        // 23.000 Hz
-#define DESKSPLIT_MAX_REFRESH_MHZ   1000000u      // 1000.000 Hz
+#define DESKSPLIT_MIN_DIMENSION     1u
+// D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION: the renderer/shared textures' actual API bound.
+#define DESKSPLIT_MAX_DIMENSION     16384u
+#define DESKSPLIT_MIN_REFRESH_MHZ   1u           // Nonzero rational only; no product refresh-rate cap.
+#define DESKSPLIT_MAX_REFRESH_MHZ   0xFFFFFFFFu
 
 typedef struct DESKSPLIT_TIMING
 {

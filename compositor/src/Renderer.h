@@ -52,8 +52,8 @@ public:
     GpuContext* Gpu() { return &m_gpu; }
     void SetStopEvent(HANDLE stopEvent) { m_presenterOptions.stopEvent = stopEvent; }
 
-    uint32_t Routing() const { return m_routing.load(std::memory_order_acquire); }
-    bool ExchangeRouting(uint32_t expected, uint32_t desired) {
+    uint64_t Routing() const { return m_routing.load(std::memory_order_acquire); }
+    bool ExchangeRouting(uint64_t expected, uint64_t desired) {
         return ds::ExchangeRouting(m_routing, m_cfg.segments.size(), expected, desired);
     }
 
@@ -96,7 +96,7 @@ private:
 
     HWND        m_hwnd = nullptr;
     AppConfig   m_cfg;
-    std::atomic<uint32_t> m_routing{0};
+    std::atomic<uint64_t> m_routing{0};
     std::vector<SegmentShared>* m_segments = nullptr;
 
     GpuContext m_gpu;
@@ -127,6 +127,7 @@ private:
     LARGE_INTEGER m_qpcFreq = {};
     long long     m_nextPresentQpc = 0;
     HANDLE        m_paceTimer = nullptr;
+    HANDLE        m_paceStop = nullptr;
 };
 
 } // namespace ds

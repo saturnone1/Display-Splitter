@@ -14,6 +14,8 @@ public enum LayoutKind
     /// the sides take the remainder. Segment 1 is the CENTRE (see <see cref="LayoutDefinition"/>).
     /// </summary>
     SixteenNineCenter = 6,
+    Custom = 7,
+    Grid3x3 = 8,
 }
 
 /// <summary>One segment of a layout.</summary>
@@ -39,7 +41,7 @@ public sealed record LayoutCell(
 /// <summary>A rectangle in the layout preview thumbnail, in device-independent pixels.</summary>
 public sealed record PreviewBox(double X, double Y, double W, double H, int Index);
 
-public sealed class LayoutDefinition
+public sealed partial class LayoutDefinition
 {
     public const double PreviewWidth = 132;
     public const double PreviewHeight = 76;
@@ -94,7 +96,8 @@ public sealed class LayoutDefinition
     /// which is not necessarily left-to-right track order.
     /// </summary>
     public IReadOnlyList<(int Width, int Height)> ComputeDefaultSegmentSizes(int physWidth, int physHeight)
-        => _defaultSizes?.Invoke(physWidth, physHeight)
+        => IsCustom ? ComputePhysRects(physWidth, physHeight).Select(r => (r.W, r.H)).ToArray()
+           : _defaultSizes?.Invoke(physWidth, physHeight)
            ?? ComputePhysRects(physWidth, physHeight).Select(r => (r.W, r.H)).ToList();
 
     private static IReadOnlyList<PreviewBox> BuildPreview(IReadOnlyList<LayoutCell> cells)
@@ -126,6 +129,7 @@ public sealed class LayoutDefinition
     /// </summary>
     public IReadOnlyList<PixelRect> ComputePhysRects(int physWidth, int physHeight)
     {
+        if (IsCustom) return FreeLayout.Compute(CustomCuts, physWidth, physHeight).Rects;
         var rects = new List<PixelRect>(Cells.Count);
         foreach (LayoutCell c in Cells)
         {
@@ -199,6 +203,11 @@ public sealed class LayoutDefinition
 
     public static IReadOnlyList<LayoutDefinition> All { get; } = new[]
     {
+        CreateCustom(Array.Empty<LayoutCut>()),
+        Make(LayoutKind.Grid3x3, "격자 9분할", "가로 세 칸 · 세로 세 칸", 3, 3,
+            new[] { 0, 1 }, new[] { 0, 1 },
+            Enumerable.Range(0, 9).Select(i => new LayoutCell((i % 3) / 3.0, (i / 3) / 3.0,
+                1.0 / 3, 1.0 / 3, i % 3, i / 3, 1, 1)).ToArray()),
         Make(LayoutKind.TwoVertical, "좌우 2분할", "왼쪽과 오른쪽에 화면 하나씩", 2, 1,
             new[] { 0 }, Array.Empty<int>(),
             new LayoutCell(0.0, 0.0, 0.5, 1.0, 0, 0, 1, 1),
@@ -249,8 +258,9 @@ public sealed class LayoutDefinition
             new LayoutCell(0.75, 0.0, 0.25, 1.0, 3, 0, 1, 1)),
     };
 
-    public static LayoutDefinition FromKind(LayoutKind kind)
-        => All.FirstOrDefault(l => l.Kind == kind) ?? All[0];
+    public static LayoutDefinition FromKind(LayoutKind kind, IReadOnlyList<LayoutCut>? cuts = null)
+        => kind == LayoutKind.Custom ? CreateCustom(cuts ?? Array.Empty<LayoutCut>())
+            : All.FirstOrDefault(l => l.Kind == kind) ?? All.First(l => l.Kind == LayoutKind.TwoVertical);
 
     public override string ToString() => Name;
 }

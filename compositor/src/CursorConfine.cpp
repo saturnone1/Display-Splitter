@@ -1,260 +1,134 @@
 #include "CursorConfine.h"
 #include "MonitorUtil.h"
-#include "Geometry.h"
+#include "PointerTopology.h"
 #include "Log.h"
-
 #include <atomic>
 
 namespace ds {
-
 namespace {
+SRWLOCK g_lock = SRWLOCK_INIT;
+PointerTopology g_topology;
+std::function<uint64_t()> g_routing;
+HHOOK g_hook = nullptr;
+POINT g_previous{};
+bool g_havePrevious = false;
+POINT g_warp{};
+bool g_pendingWarp = false;
 
-// Hook state. Refresh() writes it under the exclusive lock from the UI thread;
-// the hook procedure reads it under the shared lock. 'g_lastGood' is hot on
-// every mouse move, so it is a lock-free packed atomic instead.
-SRWLOCK           g_lock = SRWLOCK_INIT;
-RECT              g_coveredRect = {};      // the monitor dscomp hides
-bool              g_haveCovered = false;
-std::vector<RECT> g_allMonitorRects;       // for validating a slid-to point
-RECT              g_clipRect = {};
-bool              g_useClip = false;       // only when the allowed area is 1 rect
-bool              g_clipApplied = false;
-HHOOK             g_hook = nullptr;
-
-std::atomic<uint64_t> g_lastGood{0};
-std::atomic<bool>     g_haveLastGood{false};
-std::atomic<uint64_t> g_blockedMoves{0};
-
-uint64_t PackPoint(POINT p) {
-    return static_cast<uint64_t>(static_cast<uint32_t>(p.x)) |
-           (static_cast<uint64_t>(static_cast<uint32_t>(p.y)) << 32);
-}
-
-POINT UnpackPoint(uint64_t v) {
-    POINT p;
-    p.x = static_cast<LONG>(static_cast<int32_t>(v & 0xFFFFFFFFu));
-    p.y = static_cast<LONG>(static_cast<int32_t>((v >> 32) & 0xFFFFFFFFu));
-    return p;
-}
-
-LRESULT CALLBACK MouseHookProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code != HC_ACTION) return ::CallNextHookEx(g_hook, code, wParam, lParam);
-
-    const MSLLHOOKSTRUCT* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
-    // Ignore our own SetCursorPos below (it comes back as an injected move).
-    if (ms == nullptr || (ms->flags & LLMHF_INJECTED) != 0 || wParam != WM_MOUSEMOVE) {
-        return ::CallNextHookEx(g_hook, code, wParam, lParam);
+bool Redirect(POINT point) {
+    g_previous = point; g_havePrevious = true;
+    g_warp = point; g_pendingWarp = true;
+    if (!::SetCursorPos(point.x, point.y)) {
+        g_pendingWarp = false; g_havePrevious = false; return false;
     }
+    POINT actual{};
+    if (::GetCursorPos(&actual) && (actual.x != point.x || actual.y != point.y)) {
+        // Another application may own ClipCursor. Do not fight its clip or
+        // swallow input on the assumption that the requested warp succeeded.
+        g_previous = actual; g_pendingWarp = false; return false;
+    }
+    return true;
+}
 
+LRESULT CALLBACK MouseHookProc(int code, WPARAM message, LPARAM data) {
+    if (code != HC_ACTION || message != WM_MOUSEMOVE || !data)
+        return ::CallNextHookEx(g_hook, code, message, data);
+    const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
+    if (ms->flags & LLMHF_INJECTED) return ::CallNextHookEx(g_hook, code, message, data);
     const POINT dest = ms->pt;
-
-    // Reused across calls: the hook procedure only ever runs on the thread that
-    // installed it, so this needs no synchronisation and no per-move allocation.
-    static std::vector<RECT> s_monitors;
-
-    RECT covered = {};
-    bool haveCovered = false;
+    if (g_pendingWarp && dest.x == g_warp.x && dest.y == g_warp.y) {
+        return ::CallNextHookEx(g_hook, code, message, data);
+    }
+    g_pendingWarp = false;
+    // Reuse vector capacity: no recurring heap allocation on mouse movement.
+    static PointerTopology topology;
+    uint64_t routing = 0;
     ::AcquireSRWLockShared(&g_lock);
-    haveCovered = g_haveCovered;
-    covered = g_coveredRect;
-    if (haveCovered && RectContains(covered, dest)) {
-        s_monitors.assign(g_allMonitorRects.begin(), g_allMonitorRects.end());
-    }
+    topology = g_topology;
+    if (g_routing) routing = g_routing();
     ::ReleaseSRWLockShared(&g_lock);
-
-    if (!haveCovered || !RectContains(covered, dest)) {
-        // Allowed. Remember it as the approach point for the next blocked move.
-        g_lastGood.store(PackPoint(dest), std::memory_order_relaxed);
-        g_haveLastGood.store(true, std::memory_order_relaxed);
-        return ::CallNextHookEx(g_hook, code, wParam, lParam);
+    if (!ValidPointerTopology(topology, routing)) {
+        g_previous = dest; g_havePrevious = true;
+        return ::CallNextHookEx(g_hook, code, message, data);
     }
-
-    // The destination is inside the covered monitor. Slide along its edge:
-    // clamp only the axis the movement entered through, keep the other.
-    POINT prev = dest;
-    if (g_haveLastGood.load(std::memory_order_relaxed)) {
-        prev = UnpackPoint(g_lastGood.load(std::memory_order_relaxed));
-    } else {
-        ::GetCursorPos(&prev);
-    }
-
-    POINT corrected = SlideAlongEdge(covered, prev, dest);
-
-    // Sliding can land in a gap between monitors when displays are not flush.
-    // Fall back to holding the other axis, then to the approach point itself.
-    if (!s_monitors.empty() && !PointOnAnyRect(s_monitors, corrected)) {
-        POINT hold = corrected;
-        if (corrected.x != dest.x) hold.y = prev.y;   // X was clamped
-        else                       hold.x = prev.x;   // Y was clamped
-        if (PointOnAnyRect(s_monitors, hold)) {
-            corrected = hold;
-        } else if (PointOnAnyRect(s_monitors, prev) && !RectContains(covered, prev)) {
-            corrected = prev;
+    POINT previous = g_previous;
+    if (!g_havePrevious) ::GetCursorPos(&previous);
+    POINT corrected{};
+    if (RoutePointer(topology, routing, previous, dest, corrected)) {
+        if (corrected.x != dest.x || corrected.y != dest.y) {
+            if (Redirect(corrected)) return 1;
         }
+    } else if (!RectIsEmpty(topology.covered) && RectContains(topology.covered, dest)) {
+        corrected = SlideAlongEdge(topology.covered, previous, dest);
+        if (!PointOnAnyRect(topology.sources, corrected) && !PointOnAnyRect(topology.others, corrected)) {
+            corrected = previous;
+        }
+        if (Redirect(corrected)) return 1;
     }
-
-    g_lastGood.store(PackPoint(corrected), std::memory_order_relaxed);
-    g_haveLastGood.store(true, std::memory_order_relaxed);
-    g_blockedMoves.fetch_add(1, std::memory_order_relaxed);
-
-    ::SetCursorPos(corrected.x, corrected.y);
-    return 1;   // swallow the move that would have entered the covered monitor
+    g_previous = dest; g_havePrevious = true;
+    return ::CallNextHookEx(g_hook, code, message, data);
 }
-
 } // namespace
 
-CursorConfiner::~CursorConfiner() {
-    Release();
-}
+CursorConfiner::~CursorConfiner() { Release(); }
 
-bool CursorConfiner::Configure(const std::wstring& physicalDevice) {
-    m_physicalDevice = physicalDevice;
-    m_configured = true;
-    Refresh();
-    return true;
+bool CursorConfiner::Configure(const AppConfig& config, std::function<uint64_t()> routing) {
+    m_config = config; m_routing = std::move(routing); m_configured = true;
+    Refresh(); return true;
 }
 
 void CursorConfiner::Refresh() {
     if (!m_configured) return;
-
-    std::vector<MonitorEntry> all;
-    EnumerateMonitors(all);
-
-    RECT covered = {};
-    bool haveCovered = false;
-    std::vector<RECT> allRects;
-    std::vector<RECT> allowed;      // everything except the covered monitor
-    allRects.reserve(all.size());
-    allowed.reserve(all.size());
-
-    for (const MonitorEntry& e : all) {
-        allRects.push_back(e.rect);
-        if (::_wcsicmp(e.device.c_str(), m_physicalDevice.c_str()) == 0) {
-            covered = e.rect;
-            haveCovered = true;
-        } else {
-            allowed.push_back(e.rect);
+    std::vector<MonitorEntry> monitors;
+    EnumerateMonitors(monitors);
+    PointerTopology topology;
+    topology.sources.resize(m_config.segments.size());
+    for (const auto& segment : m_config.segments) {
+        const auto& r = segment.physRect;
+        topology.slots.push_back({r.x, r.y, r.x + r.w, r.y + r.h});
+    }
+    for (const auto& monitor : monitors) {
+        if (!_wcsicmp(monitor.device.c_str(), m_config.physicalDevice.c_str())) {
+            topology.covered = monitor.rect; continue;
         }
+        auto it = std::find_if(m_config.segments.begin(), m_config.segments.end(), [&](const auto& segment) {
+            return !_wcsicmp(monitor.device.c_str(), segment.virtualDevice.c_str());
+        });
+        if (it == m_config.segments.end()) topology.others.push_back(monitor.rect);
+        else topology.sources[static_cast<size_t>(it - m_config.segments.begin())] = monitor.rect;
     }
-
-    // ClipCursor is a single rectangle, so it can only ever express the allowed
-    // area when that area IS a single rectangle. With the physical monitor
-    // covered and other real monitors free to sit above or below the virtual
-    // row, it almost never is - and a clip that does not match reality fights
-    // the hook and snaps the cursor back. Drop it unless it fits exactly.
-    RECT clip = {};
-    bool useClip = false;
-    if (!allowed.empty() && UnionIsSingleRect(allowed)) {
-        useClip = UnionOfRects(allowed, clip);
-    }
-
-    bool hadClip = false;
+    const uint64_t routing = m_routing ? m_routing() : 0;
     ::AcquireSRWLockExclusive(&g_lock);
-    g_coveredRect = covered;
-    g_haveCovered = haveCovered;
-    g_allMonitorRects = allRects;
-    g_clipRect = clip;
-    g_useClip = useClip;
-    hadClip = g_clipApplied;
+    g_topology = topology; g_routing = m_routing;
     ::ReleaseSRWLockExclusive(&g_lock);
-
-    if (!haveCovered) {
-        DS_WARN(L"covered monitor '%s' not found; cursor confinement disabled",
-                m_physicalDevice.c_str());
-    } else {
-        DS_LOG(L"confinement: excluding '%s' (%ld,%ld)-(%ld,%ld); %zu monitor(s) "
-               L"reachable; ClipCursor %s",
-               m_physicalDevice.c_str(), covered.left, covered.top, covered.right,
-               covered.bottom, allowed.size(),
-               useClip ? L"in use (allowed area is one rect)" : L"not used");
+    // No ClipCursor: a single rectangle cannot describe a multi-monitor layout
+    // or its logical crossings, and must not override another application's clip.
+    POINT current{};
+    if (::GetCursorPos(&current)) {
+        POINT mapped{};
+        if (ProjectCoveredPoint(topology, routing, current, mapped)) Redirect(mapped);
+        else { g_previous = current; g_havePrevious = true; }
     }
-
-    if (useClip) {
-        Reapply();
-    } else if (hadClip) {
-        ::ClipCursor(nullptr);
-        ::AcquireSRWLockExclusive(&g_lock);
-        g_clipApplied = false;
-        ::ReleaseSRWLockExclusive(&g_lock);
-        DS_VERB(L"released a previously applied cursor clip");
-    }
-
-    // Re-seed the approach point; a re-base invalidates the old coordinates.
-    POINT cur = {};
-    if (::GetCursorPos(&cur)) {
-        if (haveCovered && RectContains(covered, cur)) {
-            cur = NearestOutside(covered, cur);
-            ::SetCursorPos(cur.x, cur.y);
-            DS_VERB(L"cursor was inside the covered monitor; moved to (%ld,%ld)",
-                    cur.x, cur.y);
-        }
-        g_lastGood.store(PackPoint(cur), std::memory_order_relaxed);
-        g_haveLastGood.store(true, std::memory_order_relaxed);
-    }
+    DS_LOG(L"pointer topology: %zu split sources, %zu other displays; mapping %s",
+        topology.sources.size(), topology.others.size(), ValidPointerTopology(topology, routing) ? L"ready" : L"unavailable");
 }
 
-void CursorConfiner::Reapply() {
-    RECT r = {};
-    bool use = false;
-    ::AcquireSRWLockShared(&g_lock);
-    r = g_clipRect;
-    use = g_useClip;
-    ::ReleaseSRWLockShared(&g_lock);
-    if (!use) return;   // hook-only mode: never touch another app's clip
-
-    RECT current = {};
-    if (::GetClipCursor(&current) && current.left == r.left &&
-        current.top == r.top && current.right == r.right &&
-        current.bottom == r.bottom) {
-        return;   // already ours
-    }
-    if (::ClipCursor(&r)) {
-        ::AcquireSRWLockExclusive(&g_lock);
-        g_clipApplied = true;
-        ::ReleaseSRWLockExclusive(&g_lock);
-    } else {
-        DS_VERB(L"ClipCursor failed: %s",
-                HrString(HRESULT_FROM_WIN32(::GetLastError())));
-    }
-}
+void CursorConfiner::Reapply() { /* No global rectangular cursor clip. */ }
 
 bool CursorConfiner::InstallHook() {
     if (g_hook) return true;
-    g_hook = ::SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc,
-                                 ::GetModuleHandleW(nullptr), 0);
-    if (!g_hook) {
-        DS_WARN(L"SetWindowsHookEx(WH_MOUSE_LL) failed: %s - running WITHOUT "
-                L"cursor confinement (the covered monitor stays reachable)",
-                HrString(HRESULT_FROM_WIN32(::GetLastError())));
-        return false;
-    }
-    DS_VERB(L"low-level mouse hook installed");
-    return true;
-}
-
-bool CursorConfiner::HookInstalled() const {
+    g_hook = ::SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, ::GetModuleHandleW(nullptr), 0);
+    if (!g_hook) DS_WARN(L"mouse routing hook unavailable: %s", HrString(HRESULT_FROM_WIN32(::GetLastError())));
     return g_hook != nullptr;
 }
 
+bool CursorConfiner::HookInstalled() const { return g_hook != nullptr; }
+
 void CursorConfiner::Release() {
-    if (g_hook) {
-        ::UnhookWindowsHookEx(g_hook);
-        g_hook = nullptr;
-    }
-    bool hadClip = false;
+    if (g_hook) { ::UnhookWindowsHookEx(g_hook); g_hook = nullptr; }
     ::AcquireSRWLockExclusive(&g_lock);
-    hadClip = g_clipApplied;
-    g_clipApplied = false;
-    g_useClip = false;
-    g_haveCovered = false;
-    g_allMonitorRects.clear();
+    g_topology = {}; g_routing = {};
     ::ReleaseSRWLockExclusive(&g_lock);
-
-    if (hadClip) ::ClipCursor(nullptr);
-
-    const uint64_t blocked = g_blockedMoves.exchange(0, std::memory_order_relaxed);
-    if (blocked) DS_VERB(L"confinement blocked %llu move(s)", blocked);
-    m_configured = false;
+    g_havePrevious = false; g_pendingWarp = false; m_configured = false;
 }
-
 } // namespace ds

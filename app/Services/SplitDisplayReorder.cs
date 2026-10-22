@@ -11,22 +11,22 @@ namespace DesktopSplitter.Services;
 /// <summary>Swaps whole virtual desktops between numbered slots. Only explicit hotkeys enter MoveFocusedTo.</summary>
 public static class SplitDisplayReorder
 {
-    public const uint Signature = 0x44530000;
+    public const ulong Signature = 0x4453000000000000;
 
-    public static uint Encode(IReadOnlyList<int> sources)
+    public static ulong Encode(IReadOnlyList<int> sources)
     {
-        if (sources.Count is < 1 or > 4 || !sources.Order().SequenceEqual(Enumerable.Range(0, sources.Count)))
+        if (sources.Count is < 1 or > 9 || !sources.Order().SequenceEqual(Enumerable.Range(0, sources.Count)))
             throw new ArgumentException("잘못된 화면 배치 순서입니다.");
-        uint result = Signature | ((uint)sources.Count << 8);
-        for (int i = 0; i < sources.Count; i++) result |= (uint)sources[i] << (i * 2);
+        ulong result = Signature | ((ulong)sources.Count << 36);
+        for (int i = 0; i < sources.Count; i++) result |= (ulong)sources[i] << (i * 4);
         return result;
     }
 
-    public static int[] Decode(uint routing)
+    public static int[] Decode(ulong routing)
     {
-        int count = (int)((routing >> 8) & 255);
-        if (count is < 1 or > 4) throw new InvalidOperationException("합성기가 화면 배치 변경을 지원하지 않습니다. 새 합성기로 분할을 다시 적용해 주세요.");
-        var order = Enumerable.Range(0, count).Select(i => (int)((routing >> (i * 2)) & 3)).ToArray();
+        int count = (int)((routing >> 36) & 15);
+        if (count is < 1 or > 9) throw new InvalidOperationException("합성기가 화면 배치 변경을 지원하지 않습니다. 새 합성기로 분할을 다시 적용해 주세요.");
+        var order = Enumerable.Range(0, count).Select(i => (int)((routing >> (i * 4)) & 15)).ToArray();
         if (Encode(order) != routing) throw new InvalidOperationException("합성기의 화면 배치 정보가 올바르지 않습니다.");
         return order;
     }
@@ -144,23 +144,45 @@ public static class SplitDisplayReorder
     {
         var live = LiveConnection.Open();
         var config = LoadConfig();
-        uint original = live.VerifyConfig(config); var order = Decode(original);
+        ulong original = live.VerifyConfig(config); var order = Decode(original);
         int source = config.Segments.FindIndex(s => SplitWindowMover.NormalizeDevice(s.VirtualDevice) == SplitWindowMover.NormalizeDevice(device));
         if (source < 0) return "현재 포커스된 창이 있는 화면은 DesktopSplitter 분할 화면이 아닙니다.";
         var next = Swap(order, source, slot);
-        uint desired = Encode(next);
-        if (desired == original) return $"현재 화면이 이미 배치 {slot}번에 있습니다.";
+        ApplyOrder(live, config, original, next, cancellationToken);
+        return original == Encode(next) ? $"현재 화면이 이미 배치 {slot}번에 있습니다."
+            : $"현재 화면 전체를 배치 {slot}번과 맞바꿨습니다. 해상도와 주 모니터는 유지합니다.";
+    }
+
+    public static int[]? CaptureOrder()
+    {
+        var live = LiveConnection.TryOpen();
+        return live is null ? null : Decode(live.VerifyConfig(LoadConfig()));
+    }
+
+    public static void RestoreOrder(IReadOnlyList<int> order, CancellationToken ct)
+    {
+        _ = Encode(order);
+        using var operation = ApplyService.UserOperationGate.Enter(ct);
+        using var mutation = ApplyService.DisplayOperationGate.Enter(ct);
+        var live = LiveConnection.Open();
+        var config = LoadConfig();
+        ApplyOrder(live, config, live.VerifyConfig(config), order, ct);
+    }
+
+    private static void ApplyOrder(LiveConnection live, CompositorConfig config, ulong original, IReadOnlyList<int> next, CancellationToken cancellationToken)
+    {
+        ulong desired = Encode(next);
+        if (desired == original) return;
         var monitors = DisplayConfig.Enumerate();
         var plan = Plan(monitors, config, next);
         var transaction = DisplayConfig.PreparePositions(DisplayArranger.SnapshotLayout(monitors), plan);
         if (live.Query() != original) throw new InvalidOperationException("화면 배치가 바뀌었습니다. 단축키를 다시 눌러 주세요.");
         cancellationToken.ThrowIfCancellationRequested();
         Execute(transaction.Apply, () => live.Exchange(original, desired), transaction.Rollback, () => {
-            uint current = live.Query();
+            ulong current = live.Query();
             if (current == desired) live.Exchange(desired, original);
             else if (current != original) throw new InvalidOperationException("합성기 배치가 변경되어 복원을 중단했습니다.");
         });
-        return $"현재 화면 전체를 배치 {slot}번과 맞바꿨습니다. 해상도와 주 모니터는 유지합니다.";
     }
 
     public static IReadOnlyList<SplitTarget> ResolveTargets(IReadOnlyList<SplitTarget> targets, bool requireLiveRouting = false)
@@ -180,6 +202,12 @@ public static class SplitDisplayReorder
     {
         _ = Encode(order);
         if (config.Segments.Count != order.Count) throw new InvalidOperationException("분할 칸 수가 바뀌었습니다.");
+        if (targets.Count != order.Count
+            || targets.Any(target => string.IsNullOrWhiteSpace(target.DeviceName))
+            || config.Segments.Any(segment => string.IsNullOrWhiteSpace(segment.VirtualDevice))
+            || targets.Select(target => SplitWindowMover.NormalizeDevice(target.DeviceName)).Distinct().Count() != targets.Count
+            || config.Segments.Select(segment => SplitWindowMover.NormalizeDevice(segment.VirtualDevice)).Distinct().Count() != order.Count)
+            throw new InvalidOperationException("분할 화면 연결 정보가 중복되거나 칸 수가 다릅니다. 번호 지정을 중단했습니다.");
         return order.Select((source, slot) => {
             string device = config.Segments[source].VirtualDevice;
             var target = targets.SingleOrDefault(t => SplitWindowMover.NormalizeDevice(t.DeviceName) == SplitWindowMover.NormalizeDevice(device))
@@ -196,7 +224,7 @@ public static class SplitDisplayReorder
         public static LiveConnection Open() => TryOpen() ?? throw new InvalidOperationException("화면 배치 변경에는 새 합성기가 필요합니다. 새 빌드에서 분할을 다시 적용해 주세요.");
         public static LiveConnection? TryOpen()
         {
-            uint message = RegisterWindowMessageW("DesktopSplitter.LiveLayout.v1");
+            uint message = RegisterWindowMessageW("DesktopSplitter.LiveLayout.v2");
             nint window = FindWindowExW((nint)(-3), 0, "DeskSplitCompositorWindow", null);
             if (window == 0) window = FindWindowExW(0, 0, "DeskSplitCompositorWindow", null);
             if (window == 0 || message == 0) return null;
@@ -204,31 +232,31 @@ public static class SplitDisplayReorder
             using var process = Process.GetProcessById((int)pid);
             if (!process.ProcessName.Equals("dscomp", StringComparison.OrdinalIgnoreCase)) return null;
             var live = new LiveConnection(window, message);
-            uint routing = live.Query();
-            if ((routing & 0xFFFF0000) != Signature) return null;
+            ulong routing = live.Query();
+            if ((routing & 0xFFFFFF0000000000) != Signature) return null;
             _ = Decode(routing);
             return live;
         }
-        private uint Send(nuint command, nint payload)
+        private ulong Send(nuint command, nint payload)
         {
             if (SendMessageTimeoutW(window, message, command, payload, 0x23, 1500, out nuint result) == 0)
                 throw new InvalidOperationException("화면 합성기가 응답하지 않습니다. 화면 배치 변경을 중단했습니다.");
-            return unchecked((uint)result);
+            return (ulong)result;
         }
-        public uint Query() => Send(0, 0);
-        public uint VerifyConfig(CompositorConfig config)
+        public ulong Query() => Send(0, 0);
+        public ulong VerifyConfig(CompositorConfig config)
         {
             if (Send(2, 0) != Fingerprint(config))
                 throw new InvalidOperationException("실행 중인 합성기와 저장된 분할 설정이 다릅니다. 앱에서 분할을 다시 적용해 주세요.");
-            uint routing = Query();
+            ulong routing = Query();
             if (Decode(routing).Length != config.Segments.Count)
                 throw new InvalidOperationException("실행 중인 합성기와 저장된 분할 설정이 다릅니다. 앱에서 분할을 다시 적용해 주세요.");
             return routing;
         }
-        public void Exchange(uint expected, uint desired)
+        public void Exchange(ulong expected, ulong desired)
         {
             if (IntPtr.Size != 8) throw new InvalidOperationException("화면 배치 변경에는 64비트 앱이 필요합니다.");
-            if (Send(1, unchecked((nint)(((ulong)expected << 32) | desired))) != desired)
+            if (Send((nuint)desired, unchecked((nint)expected)) != desired)
                 throw new InvalidOperationException("합성기가 화면 배치 변경을 거부했습니다.");
         }
         [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)] private static extern uint RegisterWindowMessageW(string text);

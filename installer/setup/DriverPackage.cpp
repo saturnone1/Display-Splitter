@@ -1,6 +1,8 @@
 #include "DriverPackage.h"
 
 #include <setupapi.h>
+#include <newdev.h>
+#undef DiInstallDriver // Preserve InstallMethod::DiInstallDriver below.
 #include <strsafe.h>
 
 #pragma comment(lib, "setupapi.lib")
@@ -125,7 +127,11 @@ namespace DeskSplit
             if (Install != nullptr)
             {
                 BOOL Reboot = FALSE;
-                const BOOL Ok = Install(nullptr, InfPath, 0, &Reboot);
+                // Bind the package selected by this installer to its matching
+                // hardware ID. Legacy WDK clock-based versions can outrank the
+                // product version even when their wire protocol is obsolete.
+                // Staging alone would leave that incompatible driver running.
+                const BOOL Ok = Install(nullptr, InfPath, DIIRFLAG_FORCE_INF, &Reboot);
                 const DWORD Error = Ok ? ERROR_SUCCESS : GetLastError();
 
                 if (Ok)

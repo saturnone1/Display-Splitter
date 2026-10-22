@@ -70,9 +70,14 @@ public sealed class SegmentViewModel : ObservableObject
         }
         int lo = LayoutGeometry.MinSegmentDimension;
         int hi = LayoutGeometry.MaxSegmentDimension;
-        if (w < lo || w > hi || h < lo || h > hi)
+        if (w < lo || h < lo)
         {
-            Error = $"가로와 세로는 {lo}~{hi}픽셀이어야 합니다.";
+            Error = "가로와 세로는 0보다 큰 정수여야 합니다.";
+            return;
+        }
+        if (w > hi || h > hi)
+        {
+            Error = $"현재 D3D11 합성기의 텍스처 한계({hi}픽셀)를 초과합니다.";
             return;
         }
         Error = string.Empty;

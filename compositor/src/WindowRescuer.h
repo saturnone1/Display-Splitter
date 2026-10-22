@@ -2,12 +2,11 @@
 //
 // The compositor covers the physical monitor, so any window that opens or is
 // restored inside that region is simply invisible. This watcher spots them and
-// moves them onto the first configured virtual monitor.
+// places them across the configured virtual display group.
 //
 // It runs on its own thread with its own message pump. That matters: relocating
-// another process's window is a cross-process SetWindowPos which can block on a
-// hung app, and the UI thread also services the WH_MOUSE_LL confinement hook -
-// stalling it would stall system-wide mouse input.
+// another process's window must not block the UI thread that services mouse input.
+// Placement requests use WPF_ASYNCWINDOWPLACEMENT.
 #pragma once
 
 #include "Common.h"
@@ -27,8 +26,8 @@ public:
     WindowRescuer& operator=(const WindowRescuer&) = delete;
 
     // 'coveredDevice' - the physical monitor dscomp hides.
-    // 'targetDevice'  - segment 1's virtual monitor (config segments[0]).
-    bool Start(const std::wstring& coveredDevice, const std::wstring& targetDevice);
+    // 'targetDevices' - every source in the visible split group.
+    bool Start(const std::wstring& coveredDevice, const std::vector<std::wstring>& targetDevices);
     void Stop();
 
     // Display topology changed (re-basing moves every rect): drop cached rects.
@@ -43,13 +42,13 @@ private:
     void ThreadMain();
     void HandleEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild);
     void FlushPending();
-    void Evaluate(HWND hwnd);
-    bool ShouldRescue(HWND hwnd, RECT& windowRect) const;
+    void Evaluate(HWND hwnd, bool activated = false);
+    bool ShouldRescue(HWND hwnd, RECT& windowRect, bool activated) const;
     bool RefreshRects();
     bool RateLimit(HWND hwnd);
 
     std::wstring m_coveredDevice;
-    std::wstring m_targetDevice;
+    std::vector<std::wstring> m_targetDevices;
 
     std::thread        m_thread;
     std::atomic<DWORD> m_threadId{0};
@@ -60,9 +59,11 @@ private:
     HWINEVENTHOOK m_hookShow = nullptr;
     HWINEVENTHOOK m_hookMoveSizeEnd = nullptr;
     HWINEVENTHOOK m_hookLocation = nullptr;
+    HWINEVENTHOOK m_hookForeground = nullptr;
 
     RECT  m_coveredRect = {};
     RECT  m_targetWork = {};
+    std::vector<RECT> m_monitorRects;
     bool  m_rectsValid = false;
     DWORD m_rectsTick = 0;
     DWORD m_ownPid = 0;

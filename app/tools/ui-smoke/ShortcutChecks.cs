@@ -12,8 +12,11 @@ internal static class ShortcutChecks
         var defaults = new ShortcutSettings();
         Check(!defaults.Enabled, "Shortcuts must default off");
         Check(ShortcutChord.Validate(defaults, out var chords, out _), "Default gestures must be valid");
-        Check(chords.Count == 11 && chords.Where(pair => ShortcutSettings.PrimaryNumber(pair.Key) is null).All(pair => pair.Value.Modifiers == 7 && pair.Value.Key is >= 0x70 and <= 0x7A), "Arrangement/app defaults changed");
-        Check(chords.Where(pair => ShortcutSettings.PrimaryNumber(pair.Key) is not null).All(pair => pair.Value.Modifiers == 7 && pair.Value.Key == 0x73 + ShortcutSettings.PrimaryNumber(pair.Key)), "Representative defaults must use Ctrl+Alt+Shift+F5..F8");
+        Check(chords.Count == 21 && chords.Values.All(chord => chord.Modifiers == 7), "Nine-slot defaults must contain 21 distinct three-modifier chords");
+        Check(chords.Where(pair => ShortcutSettings.ArrangementNumber(pair.Key) is not null).All(pair => pair.Value.Key == 0x30 + ShortcutSettings.ArrangementNumber(pair.Key)), "Arrangement keys must be digits 1..9");
+        Check(chords.Where(pair => ShortcutSettings.PrimaryNumber(pair.Key) is not null).All(pair => pair.Value.Key == 0x6F + ShortcutSettings.PrimaryNumber(pair.Key)), "Selection keys must be F1..F9");
+        Check(chords[ShortcutAction.ShowApp].Key == 0x79 && chords[ShortcutAction.Apply].Key == 0x7A && chords[ShortcutAction.Revert].Key == 0x30, "App/apply/restore defaults changed");
+        Check((int)ShortcutAction.Arrange1 == 9 && (int)ShortcutAction.Primary4 == 16, "Serialized action IDs changed");
         var removed = new ShortcutSettings { Bindings = new() { [ShortcutAction.PreviousWindow] = "Ctrl+Alt+PageUp", [ShortcutAction.NextWindow] = "Ctrl+Alt+PageDown" } }.Copy();
         Check(!removed.Bindings.ContainsKey(ShortcutAction.PreviousWindow) && !removed.Bindings.ContainsKey(ShortcutAction.NextWindow), "Removed actions survived migration");
         foreach (string invalid in new[] { "", "A", "Shift+A", "Ctrl+Ctrl+A", "Ctrl+123", "Ctrl+F12", "Alt+F4", "Ctrl+Alt+Delete", "Ctrl+Alt+Shift+S" })
@@ -24,20 +27,35 @@ internal static class ShortcutChecks
         Check(ShortcutChord.TryParse("Ctrl+Alt+,", out var comma, out _) && comma.Key == 0xBC, "Laptop comma key failed");
         Check(ShortcutChord.KeyName(System.Windows.Input.Key.D4) == "4" && ShortcutChord.KeyName(System.Windows.Input.Key.Next) == "PageDown", "Captured key names were not normalized");
         var legacy = new ShortcutSettings { Enabled = true, Bindings = new() { [ShortcutAction.ShowApp] = "Ctrl+Alt+Space" } }.Copy();
-        Check(legacy.Bindings.Count == 11 && legacy.Bindings[ShortcutAction.ShowApp] == "Ctrl+Alt+Space" && legacy.Bindings[ShortcutAction.Primary4] == "Ctrl+Alt+Shift+F8", "Migration lost custom keys or new defaults");
+        Check(legacy.Bindings.Count == 21 && legacy.Bindings[ShortcutAction.ShowApp] == "Ctrl+Alt+Space" && legacy.Bindings[ShortcutAction.Primary4] == "Ctrl+Alt+Shift+F4", "Migration lost custom keys or new defaults");
         var oldNumbers = new ShortcutSettings { Bindings = new() { [ShortcutAction.Screen1] = "Ctrl+Alt+1", [ShortcutAction.Screen2] = "Ctrl+Shift+2", [ShortcutAction.ShowApp] = "Ctrl+Alt+Shift+F1" } }.Copy();
         Check(!oldNumbers.Bindings.ContainsKey(ShortcutAction.Screen1) && !oldNumbers.Bindings.ContainsKey(ShortcutAction.Screen2)
-            && oldNumbers.DisabledActions.Contains(ShortcutAction.Arrange1) && ShortcutChord.Validate(oldNumbers, out _, out _), "Number-key migration lost custom keys or created a conflict");
+            && oldNumbers.DisabledActions.Contains(ShortcutAction.Primary1) && ShortcutChord.Validate(oldNumbers, out _, out _), "Number-key migration lost custom keys or created a conflict");
         var currentNumbers = oldNumbers.Copy(); currentNumbers.Bindings[ShortcutAction.Primary1] = "Ctrl+Alt+1";
         Check(currentNumbers.Copy().Bindings[ShortcutAction.Primary1] == "Ctrl+Alt+1", "Explicit post-migration customization was overwritten");
         var existingFive = new ShortcutSettings { Bindings = new() { [ShortcutAction.ShowApp] = "Ctrl+Alt+Shift+F5", [ShortcutAction.Screen1] = "Ctrl+Alt+1" } }.Copy();
-        Check(existingFive.DisabledActions.Contains(ShortcutAction.Primary1) && existingFive.Bindings[ShortcutAction.ShowApp] == "Ctrl+Alt+Shift+F5"
+        Check(existingFive.DisabledActions.Contains(ShortcutAction.Primary5) && existingFive.Bindings[ShortcutAction.ShowApp] == "Ctrl+Alt+Shift+F5"
             && ShortcutChord.Validate(existingFive, out _, out _), "Renumbering stole an existing custom Ctrl+5 binding");
         var previousDefaults = new ShortcutSettings { NumberKeyVersion = 3, Bindings = new() {
             [ShortcutAction.Primary1] = "Ctrl+5", [ShortcutAction.Primary2] = "Ctrl+6",
             [ShortcutAction.Primary3] = "Ctrl+7", [ShortcutAction.Primary4] = "Ctrl+8" } }.Copy();
-        Check(previousDefaults.NumberKeyVersion == 4 && previousDefaults.Bindings[ShortcutAction.Primary1] == "Ctrl+Alt+Shift+F5"
-            && previousDefaults.Bindings[ShortcutAction.Primary4] == "Ctrl+Alt+Shift+F8", "Representative defaults did not migrate");
+        Check(previousDefaults.NumberKeyVersion == ShortcutSettings.CurrentVersion && previousDefaults.Bindings[ShortcutAction.Primary1] == "Ctrl+Alt+Shift+F1"
+            && previousDefaults.Bindings[ShortcutAction.Primary4] == "Ctrl+Alt+Shift+F4", "Representative defaults did not migrate");
+        var v4Bindings = new Dictionary<ShortcutAction,string> {
+            [ShortcutAction.ShowApp] = "Ctrl+Alt+Shift+F9", [ShortcutAction.Apply] = "Ctrl+Alt+Shift+F10", [ShortcutAction.Revert] = "Ctrl+Alt+Shift+F11" };
+        for(int i=0; i<4; i++) {
+            v4Bindings[(ShortcutAction)((int)ShortcutAction.Arrange1+i)] = $"Ctrl+Alt+Shift+F{i+1}";
+            v4Bindings[(ShortcutAction)((int)ShortcutAction.Primary1+i)] = $"Ctrl+Alt+Shift+F{i+5}";
+        }
+        var v4 = new ShortcutSettings { Enabled=true, NumberKeyVersion=4, Bindings=v4Bindings, DisabledActions=new() { ShortcutAction.Arrange3 } }.Copy();
+        Check(v4.Enabled && v4.DisabledActions.SetEquals(new[] {ShortcutAction.Arrange3}) && v4.Bindings.All(pair=>pair.Value == ShortcutSettings.Defaults()[pair.Key]) && ShortcutChord.Validate(v4,out _,out _), "Full v4 defaults did not migrate atomically");
+        var customConflict = new ShortcutSettings { NumberKeyVersion=4, Bindings=new() { [ShortcutAction.ShowApp]="Control+Alt+Shift+2" } }.Copy();
+        Check(customConflict.Bindings[ShortcutAction.ShowApp]=="Control+Alt+Shift+2" && customConflict.DisabledActions.Contains(ShortcutAction.Arrange2) && ShortcutChord.Validate(customConflict,out _,out _), "Migration stole a custom digit binding");
+        Check(JsonSerializer.Serialize(customConflict.Copy()) == JsonSerializer.Serialize(customConflict), "Migration is not idempotent");
+        var customized = defaults.Copy();
+        customized.Bindings[ShortcutAction.Primary9] = "Ctrl+Alt+Shift+F13";
+        customized.Bindings[ShortcutAction.ShowApp] = "Ctrl+Alt+Shift+F9";
+        Check(customized.Copy().Bindings[ShortcutAction.ShowApp] == "Ctrl+Alt+Shift+F9" && ShortcutChord.Validate(customized.Copy(),out _,out _), "Current-version customization was remigrated");
         var duplicate = defaults.Copy();
         duplicate.Bindings[ShortcutAction.Primary4] = "Control+Alt+Shift+F9";
         Check(!ShortcutChord.Validate(duplicate, out _, out _), "Equivalent duplicate was accepted");
@@ -47,6 +65,13 @@ internal static class ShortcutChecks
         Check(!ShortcutExecutionPolicy.CanExecute(ShortcutAction.Primary1, false, true, false), "Representative choice was allowed while busy");
         Check(!ShortcutExecutionPolicy.CanExecute(ShortcutAction.ShowApp, true, false, false), "Editing executed an action");
 
+        var broken = defaults.Copy(); broken.Enabled=true;
+        broken.Bindings[ShortcutAction.Primary9]="Ctrl+Alt+Shift+F12";
+        broken.Bindings[ShortcutAction.ShowApp]="Ctrl+Alt+Space";
+        var repaired = new ShortcutSettingsViewModel(_=>{}, load:()=>new AppSettings { Shortcuts=broken },save:_=>throw new Exception("Unexpected save"));
+        Check(repaired.Current.Enabled && repaired.Current.Bindings[ShortcutAction.ShowApp]=="Ctrl+Alt+Space"
+            && repaired.Current.Bindings[ShortcutAction.Primary9]=="Ctrl+Alt+Shift+F12"
+            && repaired.Current.DisabledActions.SetEquals(new[] {ShortcutAction.Primary9}) && ShortcutChord.Validate(repaired.Current,out _,out _), "One invalid key discarded unrelated shortcut settings");
         var fake = new FakeRegistrar();
         using var service = new GlobalShortcutService(1, fake);
         Check(service.Configure(defaults) is null && fake.RegisterCalls == 0, "Disabled configuration registered global keys");
@@ -66,11 +91,17 @@ internal static class ShortcutChecks
         Check(!service.HandleMessage(GlobalShortcutService.MessageId, registrations[0].Key, 0), "Mismatched payload was routed");
         var firstAction = chords[ShortcutAction.ShowApp];
         Check(service.HandleMessage(GlobalShortcutService.MessageId, registrations[0].Key, Data(firstAction) | 0x4000), "Registration behavior flag prevented dispatch");
-        fake.FailKey = 0x7C; // F13, deliberately unavailable (defaults are F1..F11)
+        fake.FailKey = 0x7C; // F13, deliberately unavailable in this fake registrar
         var changed = enabled.Copy(); changed.Bindings[ShortcutAction.Apply] = "Ctrl+Alt+F13";
         Check(service.Configure(changed) is null && fake.Registered.Count == ShortcutSettings.Actions.Count - 1 && service.RegistrationErrors.ContainsKey(ShortcutAction.Apply), "One conflict disabled unrelated shortcuts");
         Check(!service.HandleMessage(GlobalShortcutService.MessageId, registrations[0].Key, Data(chords[ShortcutAction.ShowApp])), "Stale queued message survived reconfiguration");
         fake.FailKey = 0;
+        fake.FailUnregister=true;
+        var held=fake.Registered.First();
+        int receivedBeforeFailure=dispatched.Count;
+        Check(service.Configure(defaults) is not null, "Unregister failure was not reported");
+        Check(!service.HandleMessage(GlobalShortcutService.MessageId,held.Key,Data(held.Value)) && dispatched.Count==receivedBeforeFailure, "Failed pause still dispatched a display shortcut");
+        fake.FailUnregister=false;
         Check(service.Configure(defaults) is null && fake.Registered.Count == 0, "Disabling did not unregister keys");
         Check(!service.HandleMessage(GlobalShortcutService.MessageId, registrations[0].Key, Data(chords[ShortcutAction.ShowApp])), "Disabled shortcut dispatched");
 
@@ -82,6 +113,8 @@ internal static class ShortcutChecks
             if (failSave) throw new IOException("test save failure");
             stored = Copy(value);
         });
+        Check(vm.ArrangementRows.Select(row=>ShortcutSettings.ArrangementNumber(row.Action)!.Value).SequenceEqual(Enumerable.Range(1,9))
+            && vm.PrimaryRows.Select(row=>ShortcutSettings.PrimaryNumber(row.Action)!.Value).SequenceEqual(Enumerable.Range(1,9)), "Nine-slot settings rows are missing or out of order");
         vm.AttachRegistrar(service.Configure, () => service.RegistrationErrors);
         vm.Enabled = true;
         vm.SaveCommand.Execute(null);
@@ -100,14 +133,18 @@ internal static class ShortcutChecks
         vm.ResetCommand.Execute(null);
         vm.Rows.Single(r => r.Action == ShortcutAction.Primary4).Enabled = false;
         vm.SaveCommand.Execute(null);
-        Check(stored.Shortcuts.DisabledActions.Contains(ShortcutAction.Primary4) && fake.Registered.Count == 10, "Per-action opt-out was not persisted");
+        Check(stored.Shortcuts.DisabledActions.Contains(ShortcutAction.Primary4) && fake.Registered.Count == ShortcutSettings.Actions.Count - 1, "Per-action opt-out was not persisted");
         vm.Rows.Single(r => r.Action == ShortcutAction.Apply).Gesture = "Ctrl+Alt+F13";
         fake.FailKey = 0x7C;
         vm.SaveCommand.Execute(null);
-        Check(vm.Rows.Single(r => r.Action == ShortcutAction.Apply).HasRegistrationIssue && fake.Registered.Count == 9
+        Check(vm.Rows.Single(r => r.Action == ShortcutAction.Apply).HasRegistrationIssue && fake.Registered.Count == ShortcutSettings.Actions.Count - 2
             && vm.Status.Contains("등록 실패"), "Partial registration failure was not visible per row");
         vm.ResetCommand.Execute(null);
         Check(vm.Rows.All(row => row.Gesture == ShortcutSettings.Defaults()[row.Action]), "Reset did not restore function keys");
+        vm.Rows.Single(row=>row.Action==ShortcutAction.Apply).Gesture="Ctrl+Alt+Shift+F12";
+        vm.Enabled=false;
+        vm.SaveCommand.Execute(null);
+        Check(!stored.Shortcuts.Enabled && fake.Registered.Count==0, "Invalid draft prevented global shortcut disable");
         service.Dispose();
         Check(fake.Registered.Count == 0 && !service.HandleMessage(GlobalShortcutService.MessageId, registrations[0].Key, 0), "Disposed service retained keys");
 
@@ -143,7 +180,7 @@ internal static class ShortcutChecks
         catch (IOException) { }
         Check(sequence.SequenceEqual(new[] { "restore", "maximize" }), "Failed move lost maximized state");
         CheckReordering();
-        Console.WriteLine("PASS shortcuts: Ctrl+Alt+Shift+F5..F8 matrix representatives, seven arrangement/app keys, retired window-move actions, custom-key preservation, conflicts, stale messages, editing, persistence and geometry; no native keys registered, displays changed or windows moved");
+        Console.WriteLine("PASS shortcuts: 21 chords, nine arrangement digits, nine selection function keys, legacy defaults/custom-key migration, retired window-move actions, custom-key preservation, conflicts, stale messages, editing, persistence and geometry; no native keys registered, displays changed or windows moved");
     }
 
     private static void CheckReordering()
@@ -155,8 +192,8 @@ internal static class ShortcutChecks
         var monitors = Enumerable.Range(0, 4).Select(i => new MonitorInfo { DeviceName = $"V{i}", IsDeskSplitVirtual = true,
             DeskSplitMonitorIndex = i, CurrentWidth = 100, CurrentHeight = 100,
             PositionX = (i % 2) * 100, PositionY = (i / 2) * 100, IsPrimary = i == 0 }).ToArray();
-        uint identity = SplitDisplayReorder.Encode(new[] { 0, 1, 2, 3 });
-        Check(identity == 0x445304E4 && SplitDisplayReorder.Decode(identity).SequenceEqual(new[] { 0, 1, 2, 3 }), "Native routing wire format changed");
+        ulong identity = SplitDisplayReorder.Encode(new[] { 0, 1, 2, 3 });
+        Check(identity == 0x4453004000003210 && SplitDisplayReorder.Decode(identity).SequenceEqual(new[] { 0, 1, 2, 3 }), "Native routing wire format changed");
         Check(SplitDisplayReorder.Fingerprint(config) == 0x586EFB67, "Native config fingerprint changed");
         var order = SplitDisplayReorder.Swap(new[] { 0, 1, 2, 3 }, 3, 1);
         Check(order.SequenceEqual(new[] { 3, 1, 2, 0 }), "Whole-desktop swap shifted unrelated slots");
@@ -171,7 +208,7 @@ internal static class ShortcutChecks
         Check(SplitDisplayReorder.Swap(order, 3, 1).SequenceEqual(order), "Repeated target was not idempotent");
         Check(SplitDisplayReorder.Swap(order, 3, 4).SequenceEqual(new[] { 0, 1, 2, 3 }), "Repeated swap could not restore ordering");
         try { SplitDisplayReorder.Swap(new[] { 0, 1 }, 1, 4); throw new Exception("Missing slot accepted"); } catch (InvalidOperationException) { }
-        try { SplitDisplayReorder.Decode(0x44530400); throw new Exception("Duplicate sources accepted"); } catch (ArgumentException) { }
+        try { SplitDisplayReorder.Decode(0x4453004000000000); throw new Exception("Duplicate sources accepted"); } catch (ArgumentException) { }
         // Unequal resolutions use new tracks, preserving modes instead of resizing desktops.
         monitors[3] = new MonitorInfo { DeviceName = "V3", IsDeskSplitVirtual = true, CurrentWidth = 200, CurrentHeight = 150, PositionX = 100, PositionY = 100 };
         plan = SplitDisplayReorder.Plan(monitors, config, order);
@@ -197,6 +234,7 @@ internal static class ShortcutChecks
         public Dictionary<int, ShortcutChord> Registered { get; } = new();
         public uint FailKey { get; set; }
         public int RegisterCalls { get; private set; }
+        public bool FailUnregister { get; set; }
         public int LastError => 1409;
         public bool Register(nint window, int id, uint modifiers, uint key)
         {
@@ -205,6 +243,6 @@ internal static class ShortcutChecks
             Registered.Add(id, new(modifiers, key));
             return true;
         }
-        public bool Unregister(nint window, int id) => Registered.Remove(id);
+        public bool Unregister(nint window, int id) => !FailUnregister && Registered.Remove(id);
     }
 }

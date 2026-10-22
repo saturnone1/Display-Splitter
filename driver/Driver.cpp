@@ -498,9 +498,8 @@ IndirectDeviceContext::IndirectDeviceContext(WDFDEVICE WdfDevice)
     , m_Adapter(nullptr)
     , m_AdapterInitStarted(false)
     , m_AdapterReady(false)
-    , m_HasPendingConfig(false)
+    , m_AdapterInitStatus(STATUS_PENDING)
 {
-    ZeroMemory(&m_PendingConfig, sizeof(m_PendingConfig));
     ZeroMemory(m_Slots, sizeof(m_Slots));
 }
 
@@ -515,6 +514,7 @@ IndirectDeviceContext::~IndirectDeviceContext()
 void IndirectDeviceContext::InitAdapter()
 {
     std::lock_guard<std::recursive_mutex> Lock(m_Lock);
+    DS_INFO("InitAdapter: started=%d ready=%d, connectors=%u", m_AdapterInitStarted, m_AdapterReady, DESKSPLIT_MAX_MONITORS);
 
     if (m_AdapterInitStarted)
     {
@@ -526,6 +526,8 @@ void IndirectDeviceContext::InitAdapter()
     IDDCX_ADAPTER_CAPS AdapterCaps = {};
     AdapterCaps.Size = sizeof(AdapterCaps);
     AdapterCaps.MaxMonitorsSupported = DESKSPLIT_MAX_MONITORS;
+
+    DS_INFO("Adapter caps: MaxMonitorsSupported=%u", AdapterCaps.MaxMonitorsSupported);
 
     AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
     AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
@@ -553,9 +555,11 @@ void IndirectDeviceContext::InitAdapter()
 
     IDARG_OUT_ADAPTER_INIT AdapterInitOut = {};
     NTSTATUS Status = IddCxAdapterInitAsync(&AdapterInit, &AdapterInitOut);
+    DS_INFO("IddCxAdapterInitAsync returned 0x%08X, adapter=%p", Status, AdapterInitOut.AdapterObject);
     if (!NT_SUCCESS(Status))
     {
         DS_ERROR("IddCxAdapterInitAsync failed: 0x%08X", Status);
+        m_AdapterInitStatus = Status;
         return;
     }
 
@@ -572,6 +576,7 @@ void IndirectDeviceContext::OnAdapterInitFinished(IDDCX_ADAPTER AdapterObject, N
     std::lock_guard<std::recursive_mutex> Lock(m_Lock);
 
     m_Adapter = AdapterObject;
+    m_AdapterInitStatus = InitStatus;
 
     if (!NT_SUCCESS(InitStatus))
     {
@@ -584,22 +589,11 @@ void IndirectDeviceContext::OnAdapterInitFinished(IDDCX_ADAPTER AdapterObject, N
 
     DESKSPLIT_CONFIG Config = {};
 
-    if (m_HasPendingConfig)
+    NTSTATUS Status = LoadPersistedConfig(&Config);
+    if (!NT_SUCCESS(Status))
     {
-        Config = m_PendingConfig;
-        m_HasPendingConfig = false;
-        ZeroMemory(&m_PendingConfig, sizeof(m_PendingConfig));
-    }
-    else
-    {
-        NTSTATUS Status = LoadPersistedConfig(&Config);
-        if (!NT_SUCCESS(Status))
-        {
-            // First install, or the stored blob is missing/corrupt: start with
-            // zero virtual monitors, exactly as the architecture requires.
-            DS_INFO("No usable persisted configuration (0x%08X); starting with 0 monitors", Status);
-            return;
-        }
+        DS_INFO("No usable persisted configuration (0x%08X); starting with 0 monitors", Status);
+        return;
     }
 
     DS_INFO("Replaying configuration with %u monitor(s)", Config.MonitorCount);
@@ -616,6 +610,13 @@ NTSTATUS IndirectDeviceContext::ApplyConfig(const DESKSPLIT_CONFIG& Config, bool
 
     std::lock_guard<std::recursive_mutex> Lock(m_Lock);
 
+    // Do not accept a configuration that cannot be applied yet. The client
+    // must observe adapter readiness; clear remains available during startup.
+    if (!m_AdapterReady && Config.MonitorCount > 0)
+    {
+        return NT_SUCCESS(m_AdapterInitStatus) ? STATUS_DEVICE_NOT_READY : m_AdapterInitStatus;
+    }
+
     if (Persist)
     {
         // Persistence is best effort: an unwritable software key must not stop
@@ -627,14 +628,7 @@ NTSTATUS IndirectDeviceContext::ApplyConfig(const DESKSPLIT_CONFIG& Config, bool
         }
     }
 
-    if (!m_AdapterReady)
-    {
-        // Config arrived before EvtIddCxAdapterInitFinished; replay it there.
-        m_PendingConfig = Config;
-        m_HasPendingConfig = true;
-        DS_INFO("Adapter not ready yet; configuration queued");
-        return STATUS_SUCCESS;
-    }
+    if (!m_AdapterReady) return STATUS_SUCCESS; // Only the zero-monitor clear can reach here.
 
     // Pass 1: depart monitors that are no longer wanted, or whose mode list
     // changed (a changed mode list means a new EDID, so the monitor has to be
@@ -697,6 +691,16 @@ void IndirectDeviceContext::GetStatus(DESKSPLIT_STATUS* pStatus)
     }
 
     pStatus->ActiveMonitorCount = ActiveCount;
+}
+
+_Use_decl_annotations_
+void IndirectDeviceContext::GetDiagnostics(DESKSPLIT_DIAGNOSTICS* pDiagnostics)
+{
+    std::lock_guard<std::recursive_mutex> Lock(m_Lock);
+    pDiagnostics->Version = 1;
+    pDiagnostics->AdapterState = m_AdapterReady ? 2u :
+        (!NT_SUCCESS(m_AdapterInitStatus) ? 3u : (m_AdapterInitStarted ? 1u : 0u));
+    pDiagnostics->AdapterInitStatus = m_AdapterInitStatus;
 }
 
 _Use_decl_annotations_
@@ -829,8 +833,8 @@ NTSTATUS IndirectDeviceContext::LoadPersistedConfig(DESKSPLIT_CONFIG* pConfig)
     WDFKEY hKey = nullptr;
     NTSTATUS Status = WdfDeviceOpenRegistryKey(
         m_WdfDevice,
-        PLUGPLAY_REGKEY_DRIVER,
-        KEY_QUERY_VALUE,
+        PLUGPLAY_REGKEY_DRIVER | WDF_REGKEY_DRIVER_SUBKEY,
+        KEY_READ,
         WDF_NO_OBJECT_ATTRIBUTES,
         &hKey);
     if (!NT_SUCCESS(Status))
@@ -874,8 +878,8 @@ NTSTATUS IndirectDeviceContext::PersistConfig(const DESKSPLIT_CONFIG& Config)
     WDFKEY hKey = nullptr;
     NTSTATUS Status = WdfDeviceOpenRegistryKey(
         m_WdfDevice,
-        PLUGPLAY_REGKEY_DRIVER,
-        KEY_SET_VALUE,
+        PLUGPLAY_REGKEY_DRIVER | WDF_REGKEY_DRIVER_SUBKEY,
+        KEY_READ | KEY_SET_VALUE,
         WDF_NO_OBJECT_ATTRIBUTES,
         &hKey);
     if (!NT_SUCCESS(Status))
@@ -1159,6 +1163,22 @@ VOID DeskSplitIoDeviceControl(
         break;
     }
 
+    case IOCTL_DESKSPLIT_GET_DIAGNOSTICS:
+    {
+        PVOID Buffer = nullptr;
+        size_t Length = 0;
+        Status = WdfRequestRetrieveOutputBuffer(Request, sizeof(DESKSPLIT_DIAGNOSTICS), &Buffer, &Length);
+        if (!NT_SUCCESS(Status)) break;
+        if (Buffer == nullptr || Length < sizeof(DESKSPLIT_DIAGNOSTICS)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+        if (pContext == nullptr) { Status = STATUS_DEVICE_NOT_READY; break; }
+        DESKSPLIT_DIAGNOSTICS Diagnostics = {};
+        pContext->GetDiagnostics(&Diagnostics);
+        CopyMemory(Buffer, &Diagnostics, sizeof(Diagnostics));
+        Information = sizeof(Diagnostics);
+        Status = STATUS_SUCCESS;
+        break;
+    }
+
     default:
         break;
     }
@@ -1175,6 +1195,8 @@ NTSTATUS DeskSplitAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_I
 {
     // The OS has finished setting up the adapter; monitors may now be reported.
     auto* pWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
+    DS_INFO("AdapterInitFinished: adapter=%p wrapper=%p owner=%p status=0x%08X", AdapterObject, pWrapper,
+        pWrapper ? pWrapper->pContext : nullptr, pInArgs->AdapterInitStatus);
     if (pWrapper == nullptr || pWrapper->pContext == nullptr)
     {
         return STATUS_DEVICE_NOT_READY;

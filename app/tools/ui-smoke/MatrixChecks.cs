@@ -31,13 +31,22 @@ internal static class MatrixChecks
         Check(memory.Windows.Select(window => window.Identity.Handle).SequenceEqual(new long[] { 101, 102, 103, 104 }), "Capture used another monitor or a background window");
         Check(MatrixWorkspace.IsValid(memory), "Valid capture rejected");
         var plan = engine.Prepare(memory, targets.Select(target => target.DeviceName));
+        Check(system.FullScans == 1 && system.RememberedScans == 1, "Prepare scanned the entire desktop again");
+        foreach (var window in memory.Windows) system.Minimized.Add(window.Identity.Handle); // OS minimizes during monitor removal.
         var merged = new MatrixDestination("panel-A", LayoutKind.Grid2x2, true, targets.Select(target => target with { DeviceName = "P" }).ToArray());
         var result = engine.Restore(plan, merged, 3, default);
         Check(result.Placed == 4 && result.Focused && system.Operations[^1] == "front:103" && system.Operations.All(operation => !operation.Contains("999")), "Merged representatives/focus escaped their group");
         Check(system.Placements.All(placement => placement.DeviceName == "P"), "Merged windows went to a different physical monitor");
+        Check(system.Minimized.Count == 0, "OS-minimized remembered windows were skipped after topology changes");
         system.ClearOperations();
         try { engine.Restore(plan, merged with { PhysicalMonitorPath = "panel-B" }, 3, default); throw new Exception("Cross-monitor restore accepted"); } catch (InvalidOperationException) { }
         Check(system.Operations.Count == 0, "Foreign destination moved a window before rejection");
+        system.Minimized.Add(101); // Explicit user choice BEFORE the new transition.
+        var userMinimizedPlan = engine.Prepare(memory, targets.Select(target => target.DeviceName));
+        system.Minimized.Clear(); // OS later changes show state; original eligibility must still win.
+        result = engine.Restore(userMinimizedPlan, merged, 3, default);
+        Check(result.Placed == 3 && system.Placements.All(placement => placement.Handle != 101), "User-minimized window was pulled back into view");
+        system.ClearOperations();
 
         // User moved representative 2 to another real monitor while merged; a new split must leave it there.
         system.Candidates[2] = system.Candidates[2] with { DeviceName = "OTHER" };
@@ -98,6 +107,18 @@ internal static class MatrixChecks
             && settings.MatrixMemories.SequenceEqual(new[] { foreignMemory }), "Failed capture reused stale memory or erased another group");
         try { engine.Capture("panel-A", LayoutKind.Grid2x2, 3, targets.Select(target => target with { DeviceName = "V1" }).ToArray());
             throw new Exception("Duplicate capture devices accepted"); } catch (InvalidOperationException) { }
+        var nineSystem = new FakeWindows();
+        for (int i=1;i<=9;i++) nineSystem.Candidates.Add(Candidate(100+i,$"N{i}"));
+        var nineEngine = new MatrixWorkspace(nineSystem);
+        var nineTargets=Enumerable.Range(1,9).Select(i=>new SplitTarget(i,$"N{i}",area.Bounds,area.Work)).ToArray();
+        var nineMemory=nineEngine.Capture("panel-A",LayoutKind.Grid3x3,9,nineTargets);
+        var ninePlan=nineEngine.Prepare(nineMemory,nineTargets.Select(t=>t.DeviceName));
+        var nineMerged=new MatrixDestination("panel-A",LayoutKind.Grid3x3,true,nineTargets.Select(t=>t with {DeviceName="P"}).ToArray());
+        var nineResult=nineEngine.Restore(ninePlan,nineMerged,9,default);
+        Check(nineResult.Placed==9 && nineResult.Focused && nineSystem.Operations[^1]=="front:109", "Nine-window merge lost the ninth selected slot");
+        nineSystem.ClearOperations();
+        nineResult=nineEngine.Restore(ninePlan,new("panel-A",LayoutKind.Grid3x3,false,nineTargets),9,default);
+        Check(nineResult.Placed==9 && nineSystem.Placements.Last().DeviceName=="N9", "Nine-window re-split lost the ninth slot");
         Console.WriteLine("PASS matrix: per-monitor/layout representative choice, Windows-primary isolation, four-window merge/re-split, front ordering, foreign monitor exclusion, manual move exclusion, closed/recycled handles, cancellation and persistence; fake window adapter only");
     }
 
@@ -107,13 +128,21 @@ internal static class MatrixChecks
         public Dictionary<long, MatrixWindowIdentity> Live { get; } = new();
         public List<string> Operations { get; } = new();
         public List<(long Handle, string DeviceName)> Placements { get; } = new();
-        public IReadOnlyList<MatrixCandidate> ReadFrontToBack() => Candidates;
+        public HashSet<long> Minimized { get; } = new();
+        public int FullScans, RememberedScans;
+        public IReadOnlyList<MatrixCandidate> ReadFrontToBack() { FullScans++; return Candidates.Where(candidate => !Minimized.Contains(candidate.Identity.Handle)).ToArray(); }
+        public IReadOnlyList<MatrixCandidate> ReadRemembered(IReadOnlyList<MatrixWindowIdentity> identities) {
+            RememberedScans++;
+            var handles = identities.Select(identity => identity.Handle).ToHashSet();
+            return Candidates.Where(candidate => handles.Contains(candidate.Identity.Handle) && !Minimized.Contains(candidate.Identity.Handle)).ToArray();
+        }
         public MatrixWindowIdentity? Remember(MatrixCandidate window, string name) {
             var identity = window.Identity with { MarkerName = name, MarkerValue = window.Identity.Handle };
             Live[identity.Handle] = identity; return identity;
         }
         public bool IsCurrent(MatrixWindowIdentity window) => Live.GetValueOrDefault(window.Handle) == window;
         public bool Place(MatrixWindow window, SplitTarget target) {
+            Minimized.Remove(window.Identity.Handle);
             Operations.Add($"place:{window.Identity.Handle}:{target.Number}"); Placements.Add((window.Identity.Handle, target.DeviceName)); return true;
         }
         public bool BringToFront(MatrixWindowIdentity window) { Operations.Add($"front:{window.Handle}"); return true; }

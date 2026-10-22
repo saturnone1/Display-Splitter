@@ -60,6 +60,8 @@ namespace
         Errorf(pSink, L"%s failed: %s (0x%08X)", What, Message, Error);
     }
 
+    HANDLE OpenDriverInterface(DESKSPLIT_STATUS* pStatus = nullptr);
+
     bool WaitForHealthyDeviceNode(DeskSplit::DeviceNodeInfo* pInfo, DWORD TimeoutMs)
     {
         const ULONGLONG Deadline = GetTickCount64() + TimeoutMs;
@@ -67,9 +69,15 @@ namespace
         {
             if (DeskSplit::FindDeviceNode(kHardwareId, pInfo))
             {
-                if (!pInfo->HasStatus || pInfo->Problem == 0)
+                if (DeskSplit::IsStartedDevice(pInfo->HasStatus, pInfo->Status, pInfo->Problem))
                 {
-                    return true;
+                    DESKSPLIT_STATUS Status = {};
+                    HANDLE Device = OpenDriverInterface(&Status);
+                    if (Device != INVALID_HANDLE_VALUE)
+                    {
+                        CloseHandle(Device);
+                        return true;
+                    }
                 }
             }
             if (GetTickCount64() >= Deadline)
@@ -245,8 +253,10 @@ namespace
     }
 
     // Opens the driver's device interface, if the driver is running.
-    HANDLE OpenDriverInterface()
+    HANDLE OpenDriverInterface(DESKSPLIT_STATUS* pStatus)
     {
+      for (;;)
+      {
         ULONG Length = 0;
         if (CM_Get_Device_Interface_List_SizeW(
                 &Length, const_cast<GUID*>(&GUID_DEVINTERFACE_DESKSPLIT), nullptr,
@@ -262,17 +272,43 @@ namespace
         }
 
         HANDLE Device = INVALID_HANDLE_VALUE;
-        if (CM_Get_Device_Interface_ListW(
+        const CONFIGRET Result = CM_Get_Device_Interface_ListW(
                 const_cast<GUID*>(&GUID_DEVINTERFACE_DESKSPLIT), nullptr, Buffer, Length,
-                CM_GET_DEVICE_INTERFACE_LIST_PRESENT) == CR_SUCCESS && Buffer[0] != L'\0')
+                CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+        if (Result == CR_BUFFER_SMALL)
         {
-            Device = CreateFileW(Buffer, GENERIC_READ | GENERIC_WRITE,
+            LocalFree(Buffer);
+            continue; // PnP arrival raced the size query; retry on API feedback.
+        }
+        if (Result == CR_SUCCESS)
+        {
+          for (const wchar_t* Path = Buffer; *Path != L'\0'; Path += wcslen(Path) + 1)
+          {
+            Device = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE,
                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                  OPEN_EXISTING, 0, nullptr);
+            if (Device == INVALID_HANDLE_VALUE) continue;
+            if (pStatus != nullptr)
+            {
+                DWORD Returned = 0;
+                const BOOL Ok = DeviceIoControl(Device, IOCTL_DESKSPLIT_GET_STATUS,
+                    nullptr, 0, pStatus, sizeof(*pStatus), &Returned, nullptr);
+                if (!Ok || Returned != sizeof(*pStatus) ||
+                    pStatus->Version != DESKSPLIT_PROTOCOL_VERSION ||
+                    pStatus->ActiveMonitorCount > DESKSPLIT_MAX_MONITORS)
+                {
+                    CloseHandle(Device);
+                    Device = INVALID_HANDLE_VALUE;
+                    continue;
+                }
+            }
+            break;
+          }
         }
 
         LocalFree(Buffer);
         return Device;
+      }
     }
 }
 
@@ -430,7 +466,9 @@ namespace DeskSplit
                     break;
                 }
 
-                const wchar_t* Stores[] = { L"Root", L"TrustedPublisher" };
+                // Publisher first: a missing/unwritable publisher store must
+                // not leave a newly trusted root behind after a failed install.
+                const wchar_t* Stores[] = { L"TrustedPublisher", L"Root" };
                 bool CertOk = true;
                 for (const wchar_t* StoreName : Stores)
                 {
@@ -457,6 +495,27 @@ namespace DeskSplit
             else
             {
                 Detailf(pSink, L"Already trusted by this PC - no changes needed.");
+                // A previous partial installation may have trusted only Root.
+                // Chain trust alone does not establish driver-publisher trust.
+                PCCERT_CONTEXT Cert = LoadSignerCertificate(Package.CatPath);
+                if (Cert != nullptr)
+                {
+                    CertificateSummary Summary = {};
+                    if (SummarizeCertificate(Cert, &Summary) && Summary.SelfSigned)
+                    {
+                        const DWORD CertError = AddCertificateToStore(Cert, L"TrustedPublisher");
+                        CertFreeCertificateContext(Cert);
+                        Cert = nullptr;
+                        if (CertError != ERROR_SUCCESS)
+                        {
+                            ReportWin32(pSink, L"Ensuring driver publisher trust", CertError);
+                            Result = ExitCertInstallFailed;
+                            break;
+                        }
+                        Detailf(pSink, L"Confirmed the trusted development publisher in LocalMachine\\TrustedPublisher.");
+                    }
+                    if (Cert != nullptr) CertFreeCertificateContext(Cert);
+                }
             }
             pSink->OnProgress(25);
 
@@ -557,6 +616,15 @@ namespace DeskSplit
                 if (Info.InstanceId[0] == L'\0')
                 {
                     Errorf(pSink, L"The virtual display device did not appear.");
+                }
+                else if (!Info.HasStatus)
+                {
+                    Errorf(pSink, L"The device exists, but Windows could not report its status.");
+                }
+                else if (DeskSplit::IsStartedDevice(Info.HasStatus, Info.Status, Info.Problem))
+                {
+                    Errorf(pSink, L"The device is present, but a compatible driver did not respond to GET_STATUS. "
+                                   L"Check the driver version and load status; an update may require a reboot.");
                 }
                 else
                 {

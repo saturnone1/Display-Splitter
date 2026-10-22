@@ -32,6 +32,8 @@ internal static class Program
             if (args.Contains("--matrix")) { MatrixChecks.Run(); return 0; }
             if (args.Contains("--matrix-ui")) return CheckMatrixUi();
             if (args.Contains("--live-sync")) { LiveSyncChecks.Run(); return 0; }
+            if (args.Contains("--free-layout")) { FreeLayoutChecks.Run(); return 0; }
+            if (args.Contains("--win10-fixes")) { Win10FixChecks.Run(); return 0; }
             if (args.Contains("--refactor")) { RefactorChecks.Run(); return 0; }
             if (args.Contains("--performance")) { RefactorChecks.Benchmark(); return 0; }
             if (args.Contains("--confirmation-ui")) return CheckConfirmationUi();
@@ -131,7 +133,8 @@ internal static class Program
         app.InitializeComponent();
         string? before = File.Exists(SettingsStore.FilePath) ? File.ReadAllText(SettingsStore.FilePath) : null;
         var monitor = new MonitorInfo { DeviceName = "MATRIX-FIXTURE", MonitorDevicePath = "MATRIX-FIXTURE-PATH", FriendlyName = "매트릭스 검토용 모니터", CurrentWidth = 2560, CurrentHeight = 1440, MaxRefreshHz = 144 };
-        var snapshot = new DesktopSnapshot(new[] { monitor }, "검토용 상태", "검토용 상태", 4, monitor.MonitorDevicePath, DesktopSplitter.Models.LayoutKind.Grid2x2, SelectedSlot: 3);
+        var targets = Enumerable.Range(1,4).Select(slot=>new SplitTarget(slot,$"FIXTURE-V{slot}",new(0,0,1280,720),new(0,0,1280,720),slot)).ToArray();
+        var snapshot = new DesktopSnapshot(new[] { monitor }, "검토용 상태", "검토용 상태", 4, monitor.MonitorDevicePath, DesktopSplitter.Models.LayoutKind.Grid2x2, targets, SelectedSlot: 3);
         var view = new MainViewModel(previewOnly: true, statusReader: () => snapshot);
         CompleteOnDispatcher(view.Initialization);
         view.SelectedLayout = LayoutDefinition.FromKind(DesktopSplitter.Models.LayoutKind.Grid2x2);
@@ -161,14 +164,13 @@ internal static class Program
         }).Task.Unwrap());
         Require(!view.IsActiveMatrix && !view.PrimaryChoices.Any() && view.Zones.All(zone => !zone.IsPrimary)
             && view.DisplayStateText.Contains("원본 화면") && view.MatrixStateText.Contains("선택 칸이 없습니다")
-            && view.IsOriginalScreen && !view.IsSplitEditorExpanded,
+            && view.IsOriginalScreen,
             $"Merge notification left stale split state or representative numbers: active={view.IsActiveMatrix}, choices={view.PrimaryChoices.Count()}, badges={view.Zones.Count(zone => zone.IsPrimary)}, state={view.DisplayStateText}, matrix={view.MatrixStateText}, log={view.StatusText}");
         AppAppearance.Apply(false);
         window.UpdateLayout();
-        Require(!((System.Windows.Controls.Expander)window.FindName("SplitEditorExpander")).IsExpanded
-            && ((FrameworkElement)window.FindName("SplitEditorContent")).Visibility == Visibility.Collapsed
-            && ((FrameworkElement)window.FindName("OriginalScreenPreview")).Visibility == Visibility.Visible,
-            "Merged view kept displaying the old split editor");
+        Require(((FrameworkElement)window.FindName("SplitEditorContent")).Visibility == Visibility.Visible
+            && window.FindName("OriginalScreenPreview") is null && window.FindName("LiveSlotsList") is null,
+            "Merged view hid the editor or retained the removed current-state panel");
         panel.BringIntoView();
         Render(window, Path.Combine(output, "merged.png"));
         snapshot = snapshot with { ActiveVirtualCount = 4 };
@@ -269,7 +271,7 @@ internal static class Program
         return 0;
     }
 
-    private static void Render(Window window, string path)
+    internal static void Render(Window window, string path)
     {
         var root = (FrameworkElement)window.Content;
         // The unshown window has no presentation source. Supply the same inherited
@@ -378,7 +380,7 @@ internal static class Program
     private static int CheckHidingDetails()
     {
         string? originalSettings = File.Exists(SettingsStore.FilePath) ? File.ReadAllText(SettingsStore.FilePath) : null;
-        uint? originalMonitorCount = DriverClient.TryFindDevicePath(out _) ? DriverClient.GetStatus().ActiveMonitorCount : null;
+        int originalMonitorCount = DisplayConfig.EnumerateVirtual().Count;
         var app = new DesktopSplitter.App(suppressStartup: true);
         app.InitializeComponent();
         var viewModel = new MainViewModel(previewOnly: true);
@@ -427,8 +429,7 @@ internal static class Program
             "Diagnostic rendering invoked product startup");
         Require(originalSettings == (File.Exists(SettingsStore.FilePath) ? File.ReadAllText(SettingsStore.FilePath) : null),
             "Diagnostic rendering changed product settings");
-        if (originalMonitorCount.HasValue)
-            Require(DriverClient.GetStatus().ActiveMonitorCount == originalMonitorCount.Value, "Diagnostic rendering changed virtual monitor count");
+        Require(DisplayConfig.EnumerateVirtual().Count == originalMonitorCount, "Diagnostic rendering changed virtual monitor count");
         window.Close();
         return 0;
     }
@@ -530,7 +531,7 @@ internal static class Program
         document.Root!.Attribute(xaml + "Class")!.Remove();
         document.Descendants().Where(element => element.Name.LocalName == "EventSetter").Remove();
         document.Descendants().Attributes().Where(attribute => attribute.Name.LocalName is
-            "PreviewKeyDown" or "GotKeyboardFocus" or "LostKeyboardFocus").Remove();
+            "PreviewKeyDown" or "GotKeyboardFocus" or "LostKeyboardFocus" or "MouseLeftButtonDown").Remove();
         foreach (XAttribute attribute in document.Descendants().Attributes()
                      .Where(attribute => attribute.Value.StartsWith("{Binding ") && !attribute.Value.Contains("Mode=")))
             attribute.Value = attribute.Value.Insert(attribute.Value.Length - 1, ", Mode=OneWay");

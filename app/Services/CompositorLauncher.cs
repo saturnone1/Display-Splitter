@@ -19,6 +19,18 @@ public static class CompositorLauncher
 
     /// <summary>DESKSPLIT_COMPOSITOR_STOP_EVENT</summary>
     public const string StopEventName = @"Global\DeskSplitCompositorStop";
+    public const string ReadyEventPrefix = @"Local\DeskSplitCompositorReady.";
+
+    public static void WaitForReady(Process process, int safetySeconds, CancellationToken ct)
+    {
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyEventPrefix + process.Id);
+        using var exited = new ProcessExitHandle(process);
+        var result = ReadinessWait.Wait(ready, exited, TimeSpan.FromSeconds(safetySeconds), ct);
+        if (result == SpecializedWait.TimedOut)
+            throw new ApplyException("합성기 초기화가 설정된 안전 복원 시간 안에 완료되지 않아 이전 화면으로 복원합니다.");
+        if (result != SpecializedWait.Live)
+            throw new ApplyException($"합성기가 초기화를 마치기 전에 종료되었습니다 (코드 {process.ExitCode}).");
+    }
 
     /// <summary>
     /// The compositor signals this after its FIRST successful specialized scan-out. This — not

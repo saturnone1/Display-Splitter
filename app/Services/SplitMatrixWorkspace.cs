@@ -54,11 +54,12 @@ public static class SplitMatrixWorkspace
         return discarded;
     }
 
-    public static MatrixRestorePlan? PrepareRestore(string physicalPath, LayoutKind layout, IProgress<string> log)
+    public static MatrixRestorePlan? PrepareRestore(string physicalPath, LayoutKind layout, IProgress<string> log, int? slotCount = null)
     {
         var settings = SettingsStore.Load();
         if (settings is not { RememberMatrixWindows: true }) return null;
-        var memory = settings.MatrixMemories.LastOrDefault(old => MatrixWorkspace.Matches(old, physicalPath, layout, LayoutDefinition.FromKind(layout).SegmentCount));
+        int count = slotCount ?? LayoutDefinition.FromKind(layout, settings.CustomLayoutCuts).SegmentCount;
+        var memory = settings.MatrixMemories.LastOrDefault(old => MatrixWorkspace.Matches(old, physicalPath, layout, count));
         if (memory is null) return null;
         try {
             var monitors = DisplayConfig.Enumerate();
@@ -86,7 +87,11 @@ public static class SplitMatrixWorkspace
     }
 
     public static void RestoreMerged(MatrixSnapshot? memory, IProgress<string> log, CancellationToken ct)
+        => RestoreMerged(memory is null ? null : new MatrixRestorePlan(memory, memory.Windows.Select(window => window.Identity).ToHashSet()), log, ct);
+
+    public static void RestoreMerged(MatrixRestorePlan? plan, IProgress<string> log, CancellationToken ct)
     {
+        var memory = plan?.Memory;
         if (memory is null || !MatrixWorkspace.IsValid(memory)) return;
         using var mutation = ApplyService.DisplayOperationGate.Enter(ct);
         try {
@@ -96,9 +101,8 @@ public static class SplitMatrixWorkspace
             if (physical is null) throw new InvalidOperationException("합친 원본 모니터의 연결을 확인하지 못했습니다.");
             var area = SplitWindowMover.ReadAreas().Single(item => SplitWindowMover.NormalizeDevice(item.DeviceName) == SplitWindowMover.NormalizeDevice(physical.DeviceName));
             var targets = Enumerable.Range(1, memory.SlotCount).Select(slot => new SplitTarget(slot, area.DeviceName, area.Bounds, area.Work)).ToArray();
-            var plan = new MatrixRestorePlan(memory, memory.Windows.Select(window => window.Identity).ToHashSet());
             var destination = new MatrixDestination(physical.MonitorDevicePath, memory.Layout, true, targets);
-            var result = new MatrixWorkspace(new MatrixWindowSystem()).Restore(plan, destination, memory.PrimarySlot, ct);
+            var result = new MatrixWorkspace(new MatrixWindowSystem()).Restore(plan!, destination, memory.PrimarySlot, ct);
             Report(result, log, "원본 화면");
         } catch (OperationCanceledException) { throw; }
         catch (Exception error) { log.Report("화면은 합쳤지만 대표 창 정리는 건너뛰었습니다: " + error.Message); }

@@ -48,7 +48,7 @@ namespace DeskSplit
 {
     int CountDeviceNodes(const wchar_t* HardwareId)
     {
-        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES);
+        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
         if (DevInfo == INVALID_HANDLE_VALUE)
         {
             return -1;
@@ -75,7 +75,7 @@ namespace DeskSplit
     {
         ZeroMemory(pInfo, sizeof(*pInfo));
 
-        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES);
+        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
         if (DevInfo == INVALID_HANDLE_VALUE)
         {
             return false;

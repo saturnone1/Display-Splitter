@@ -14,10 +14,12 @@ public sealed class MatrixWindowSystem : IMatrixWindows
     public IReadOnlyList<MatrixCandidate> ReadFrontToBack()
     {
         var found = new Dictionary<nint, MatrixCandidate>();
+        var processes = new Dictionary<int, (string Name, long Started)>();
         EnumCallback callback = (window, _) => {
             try {
-                var identity = ReadIdentity(window);
-                if (identity is null || !Eligible(window, identity)) return true;
+                if (!Eligible(window)) return true;
+                var identity = ReadIdentity(window, processes);
+                if (identity is null) return true;
                 var placement = Placement.New();
                 if (!GetWindowPlacement(window, ref placement)) return true;
                 var area = SplitWindowMover.ReadWindowArea(window);
@@ -35,22 +37,47 @@ public sealed class MatrixWindowSystem : IMatrixWindows
         return result;
     }
 
-    private static MatrixWindowIdentity? ReadIdentity(nint window)
+    public IReadOnlyList<MatrixCandidate> ReadRemembered(IReadOnlyList<MatrixWindowIdentity> identities)
+    {
+        var result = new List<MatrixCandidate>();
+        foreach (var identity in identities) {
+            try {
+                nint handle = (nint)identity.Handle;
+                if (!IsCurrent(identity) || !Eligible(handle)) continue; // User-minimized BEFORE topology changes stays minimized.
+                var placement = Placement.New();
+                if (!GetWindowPlacement(handle, ref placement)) continue;
+                var area = SplitWindowMover.ReadWindowArea(handle);
+                var r = placement.Normal;
+                if (r.Right > r.Left && r.Bottom > r.Top)
+                    result.Add(new(identity, area.DeviceName, new(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top), area, placement.ShowCommand == 3));
+            } catch (Exception error) when (error is Win32Exception or ArgumentException or InvalidOperationException) { }
+        }
+        return result;
+    }
+
+    private static MatrixWindowIdentity? ReadIdentity(nint window, Dictionary<int, (string Name, long Started)>? cache = null)
     {
         if (!IsWindow(window)) return null;
         GetWindowThreadProcessId(window, out uint pid);
         if (pid == 0 || pid == Environment.ProcessId) return null;
         var name = new StringBuilder(256);
         if (GetClassNameW(window, name, name.Capacity) == 0) return null;
-        using var process = Process.GetProcessById(checked((int)pid));
-        if (process.ProcessName.Equals("dscomp", StringComparison.OrdinalIgnoreCase)) return null;
-        return new((long)window, (int)pid, process.StartTime.ToUniversalTime().Ticks, name.ToString(), "", 0);
+        int processId = checked((int)pid);
+        if (cache is null || !cache.TryGetValue(processId, out var info)) {
+            using var process = Process.GetProcessById(processId);
+            info = (process.ProcessName, process.StartTime.ToUniversalTime().Ticks);
+            cache?.Add(processId, info);
+        }
+        if (info.Name.Equals("dscomp", StringComparison.OrdinalIgnoreCase)) return null;
+        return new((long)window, processId, info.Started, name.ToString(), "", 0);
     }
 
-    private static bool Eligible(nint window, MatrixWindowIdentity identity)
+    private static bool Eligible(nint window)
     {
         if (!IsWindowVisible(window) || IsIconic(window) || GetWindow(window, 4) != 0) return false;
-        if (identity.WindowClass is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "DeskSplitCompositorWindow") return false;
+        var name = new StringBuilder(256);
+        if (GetClassNameW(window, name, name.Capacity) == 0) return false;
+        if (name.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "DeskSplitCompositorWindow") return false;
         if ((GetWindowLongPtrW(window, -20).ToInt64() & (0x80 | 0x08000000)) != 0) return false;
         return DwmGetWindowAttribute(window, 14, out int cloaked, sizeof(int)) != 0 || cloaked == 0;
     }
@@ -79,8 +106,8 @@ public sealed class MatrixWindowSystem : IMatrixWindows
         try {
             nint handle = (nint)window.Handle;
             return window.MarkerName.StartsWith("DesktopSplitter.Matrix.", StringComparison.Ordinal) && window.MarkerValue > 0
-                && SameProcessWindow(window, ReadIdentity(handle)) && (long)GetPropW(handle, window.MarkerName) == window.MarkerValue
-                && IsWindowVisible(handle) && !IsIconic(handle);
+                && (long)GetPropW(handle, window.MarkerName) == window.MarkerValue && SameProcessWindow(window, ReadIdentity(handle))
+                && IsWindowVisible(handle); // Identity survives OS minimization caused by monitor removal.
         } catch (Exception error) when (error is Win32Exception or ArgumentException or InvalidOperationException) { return false; }
     }
 
@@ -90,16 +117,13 @@ public sealed class MatrixWindowSystem : IMatrixWindows
         var box = SplitWindowMover.Plan(window.NormalBounds, window.SourceBounds, window.SourceWork, target.Bounds, target.Work);
         var placement = Placement.New();
         placement.Flags = 4; // WPF_ASYNCWINDOWPLACEMENT: a hung app cannot block this caller.
-        placement.ShowCommand = 4; // Restore without activating other representatives.
+        placement.ShowCommand = window.Maximized ? 3u : 4u;
         placement.MaxPosition = new() { X = -1, Y = -1 };
         placement.Normal = new() { Left = box.X, Top = box.Y, Right = checked(box.X + box.Width), Bottom = checked(box.Y + box.Height) };
         nint handle = (nint)window.Identity.Handle;
-        if (!SetWindowPlacement(handle, ref placement)) return false;
-        if (window.Maximized) {
-            placement.ShowCommand = 3;
-            if (!SetWindowPlacement(handle, ref placement)) return false;
-        }
-        return true;
+        // One queued placement includes both normal bounds and final show state. Avoid racing
+        // two async normal/maximize requests against topology and foreground changes.
+        return SetWindowPlacement(handle, ref placement);
     }
 
     public bool BringToFront(MatrixWindowIdentity window)

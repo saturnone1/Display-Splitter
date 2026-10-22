@@ -53,6 +53,15 @@ inline bool IsMostlyInside(const RECT& window, const RECT& region,
     return IntersectArea(window, region) * denominator >= area * numerator;
 }
 
+inline bool NeedsWindowRescue(const RECT& window, const RECT& covered,
+                              const std::vector<RECT>& monitors, bool activated) {
+    if (RectIsEmpty(window)) return false;
+    if (IsMostlyInside(window, covered)) return true;
+    if (!activated) return false;
+    for (const auto& monitor : monitors) if (IntersectArea(window, monitor) > 0) return false;
+    return true;
+}
+
 inline bool UnionOfRects(const std::vector<RECT>& rects, RECT& out) {
     bool any = false;
     for (const RECT& r : rects) {

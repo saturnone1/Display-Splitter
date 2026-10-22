@@ -29,11 +29,14 @@ public static partial class ApplyService
     // ------------------------------------------------------------------ apply
 
     /// <summary>Read-only preflight. Must run before stopping a compositor or changing displays.</summary>
-    public static void CheckPrerequisites()
+    public static void CheckPrerequisites(CancellationToken ct = default)
     {
-        DESKSPLIT_STATUS status = DriverClient.GetStatus();
+        using var connection = DriverClient.Connect(ct);
+        DESKSPLIT_STATUS status = connection.Status;
         if (status.Version != DriverClient.DESKSPLIT_PROTOCOL_VERSION)
             throw new DriverIoException("드라이버와 앱의 통신 버전이 다릅니다. 같은 버전의 드라이버가 필요합니다.");
+        if (DriverClient.AdapterUnavailableMessage(DriverClient.ReadDiagnostics(connection.Handle)) is { } failure)
+            throw new DriverIoException(failure);
         if (!CompositorLauncher.TryFindExecutable(out _))
             throw new CompositorNotFoundException("화면 합성 프로그램(dscomp.exe)을 찾을 수 없습니다. 빌드 또는 설치 위치를 확인해 주세요.");
     }
@@ -50,15 +53,22 @@ public static partial class ApplyService
     {
         using var operation = UserOperationGate.Enter(ct);
         AppliedSnapshot snapshot = AppliedSnapshot.None;
+        string rollbackDescription = "";
+        void RestoreBeforeApply()
+        {
+            request.State?.Report(DisplayOperationState.Restoring);
+            rollbackDescription = RollBackTo(snapshot, log, CancellationToken.None, request.SpecializationUi);
+            try { request.OnRolledBack?.Invoke(); }
+            catch (Exception error) { log.Report("화면은 복원했지만 창 배치 복원은 건너뛰었습니다: " + error.Message); }
+        }
         ApplyResult applied;
         using (DisplayOperationGate.Enter(ct))
         {
             applied = recoverFailures
                 ? PipelineRecovery.Run(markChanged => ApplyCore(request, log, ct, markChanged, out snapshot), () =>
                 {
-                    request.State?.Report(DisplayOperationState.Restoring);
                     log.Report("적용이 중단되어 이전 화면 상태로 복원합니다.");
-                    RollBackTo(snapshot, log, CancellationToken.None, request.SpecializationUi);
+                    RestoreBeforeApply();
                 })
                 : ApplyCore(request, log, ct, () => { }, out snapshot);
         }
@@ -71,14 +81,13 @@ public static partial class ApplyService
         string summary = $"{request.Physical.DisplayLabel} · {request.Layout.Name} " +
                          $"({string.Join(", ", request.Resolutions.Select(r => $"{r.Width}x{r.Height}"))})";
 
-        bool confirmed = PipelineRecovery.Run(changed =>
+        bool confirmed = AppliedChangeConfirmation.Run(() => request.OnTopologyReady?.Invoke(), () =>
         {
             request.State?.Report(DisplayOperationState.AwaitingConfirmation);
-            changed(); // The display change is already live, even if opening the dialog fails.
             return request.Confirmer.ConfirmApply(summary, request.ConfirmationSeconds, ct);
         }, () => {
-            request.State?.Report(DisplayOperationState.Restoring);
-            RollBackTo(snapshot, log, CancellationToken.None, request.SpecializationUi);
+            log.Report("설정을 유지하지 않아 이전 화면과 창 배치로 복원합니다.");
+            RestoreBeforeApply();
         });
         if (confirmed)
         {
@@ -86,16 +95,13 @@ public static partial class ApplyService
             return applied;
         }
 
-        log.Report("설정 유지를 확인하지 않아 이전 화면으로 복원합니다.");
-        request.State?.Report(DisplayOperationState.Restoring);
-        string restored = RollBackTo(snapshot, log, CancellationToken.None, request.SpecializationUi);
         return new ApplyResult
         {
             VirtualMonitors = applied.VirtualMonitors,
             ConfigPath = applied.ConfigPath,
             CompositorPid = applied.CompositorPid,
             RolledBack = true,
-            RollbackDescription = restored,
+            RollbackDescription = rollbackDescription,
         };
     }
 
@@ -105,7 +111,7 @@ public static partial class ApplyService
         ct.ThrowIfCancellationRequested();
         request.State?.Report(DisplayOperationState.Applying);
         ValidateRequest(request);
-        CheckPrerequisites();
+        CheckPrerequisites(ct);
 
         MonitorInfo physical = request.Physical;
         LayoutDefinition layout = request.Layout;
@@ -154,7 +160,7 @@ public static partial class ApplyService
         {
             ct.ThrowIfCancellationRequested();
             markChanged();
-            DriverClient.SetConfig(cfg);
+            DriverClient.SetConfig(cfg, ct);
         }
         catch (DriverNotFoundException ex)
         {
@@ -241,6 +247,8 @@ public static partial class ApplyService
         //    after segment 1 was promoted to primary in step c2.
         (Process compositor, string specializedDevice) = LaunchCompositor(request, log, ct);
         using var compositorLifetime = compositor;
+        log.Report("합성기의 실제 초기화 완료 신호를 기다립니다. 취소할 수 있습니다.");
+        CompositorLauncher.WaitForReady(compositor, request.ConfirmationSeconds, ct);
 
         // f. Remember the settings for next launch / tray "Apply last".
         SettingsStore.Update(settings =>
@@ -251,6 +259,7 @@ public static partial class ApplyService
             settings.MatrixPrimarySlots[SplitPrimarySelector.ProfileKey(physical.MonitorDevicePath, layout.Kind)] = request.PrimarySlot;
             settings.PhysicalFriendlyName = physical.FriendlyName;
             settings.Layout = layout.Kind;
+            if (layout.IsCustom) settings.CustomLayoutCuts = layout.CustomCuts.ToList();
             settings.Segments = request.Resolutions.Select(r => new SegmentSize { Width = r.Width, Height = r.Height }).ToList();
             settings.PreviousPrimaryDevice = previousPrimaryDevice;
             settings.PreviousPrimaryFriendlyName = previousPrimaryName;
@@ -327,7 +336,9 @@ public static partial class ApplyService
             settings.PhysicalDevice,
             settings.Layout,
             settings.Segments.Select(s => (s.Width, s.Height)).ToList(),
-            settings.HidePhysicalDisplay) { PrimarySlot = Math.Clamp(settings.PrimarySegmentSlot, 1, settings.Segments.Count) };
+            settings.HidePhysicalDisplay) { PrimarySlot = Math.Clamp(settings.PrimarySegmentSlot, 1, settings.Segments.Count),
+                CustomCuts = settings.CustomLayoutCuts.ToArray(), RoutingOrder = SplitDisplayReorder.CaptureOrder(),
+                PhysicalMonitorPath = settings.PhysicalMonitorPath };
     }
 
     /// <summary>
@@ -345,10 +356,12 @@ public static partial class ApplyService
             return "no split (fully reverted)";
         }
 
-        MonitorInfo? physical = FindLive(snapshot.PhysicalDevice);
-        LayoutDefinition layout = LayoutDefinition.FromKind(snapshot.Layout);
+        MonitorInfo? physical = string.IsNullOrWhiteSpace(snapshot.PhysicalMonitorPath) ? FindLive(snapshot.PhysicalDevice)
+            : ReadMonitors().SingleOrDefault(monitor => !monitor.IsDeskSplitVirtual
+                && string.Equals(monitor.MonitorDevicePath, snapshot.PhysicalMonitorPath, StringComparison.OrdinalIgnoreCase));
+        LayoutDefinition? layout = ResolveSnapshotLayout(snapshot, physical);
 
-        if (physical is null || snapshot.Resolutions.Count != layout.SegmentCount)
+        if (physical is null || layout is null)
         {
             log.Report("이전 분할 설정을 사용할 수 없어 원래 화면으로 복원합니다.");
             Revert(log, ct, ui, deliberate: false);
@@ -366,8 +379,37 @@ public static partial class ApplyService
             SpecializationUi = ui,
             PromptToConfirm = false,
         }, log, ct, recoverFailures: false);
+        RestoreSnapshotRouting(snapshot, order => SplitDisplayReorder.RestoreOrder(order, ct));
 
         return $"{layout.Name} on {physical.DisplayLabel}";
+    }
+
+    /// <summary>Reapply resets routing to identity; restore verified numbering before restoring windows.</summary>
+    public static void RestoreSnapshotRouting(AppliedSnapshot snapshot, Action<IReadOnlyList<int>> restore)
+    {
+        if (!snapshot.WasApplied || snapshot.RoutingOrder is not { } order) return;
+        _ = SplitDisplayReorder.Encode(order);
+        if (order.Count != snapshot.Resolutions.Count) throw new ApplyException("복원할 화면 번호와 분할 칸 수가 다릅니다.");
+        if (!order.SequenceEqual(Enumerable.Range(0, order.Count))) restore(order);
+    }
+
+    /// <summary>A changed physical mode or corrupt cut history must fall back to a full revert.</summary>
+    public static LayoutDefinition? ResolveSnapshotLayout(AppliedSnapshot snapshot, MonitorInfo? physical)
+    {
+        if (physical is null || !Enum.IsDefined(snapshot.Layout)) return null;
+        if (!string.IsNullOrWhiteSpace(snapshot.PhysicalMonitorPath)
+            && !string.Equals(snapshot.PhysicalMonitorPath, physical.MonitorDevicePath, StringComparison.OrdinalIgnoreCase)) return null;
+        try {
+            var layout = LayoutDefinition.FromKind(snapshot.Layout, snapshot.CustomCuts);
+            if (snapshot.Resolutions.Count != layout.SegmentCount) return null;
+            if (snapshot.RoutingOrder is { } order) {
+                _ = SplitDisplayReorder.Encode(order);
+                if (order.Count != layout.SegmentCount) return null;
+            }
+            if (layout.IsCustom && !snapshot.Resolutions.SequenceEqual(layout.ComputeDefaultSegmentSizes(
+                    physical.CurrentWidth, physical.CurrentHeight))) return null;
+            return layout;
+        } catch (ArgumentException) { return null; }
     }
 
     // ------------------------------------------------------------------ revert
@@ -400,7 +442,7 @@ public static partial class ApplyService
         log.Report("드라이버에 가상 모니터 제거 요청을 전송합니다…");
         try
         {
-            DriverClient.ClearConfig();
+            DriverClient.ClearConfig(ct);
         }
         catch (DriverNotFoundException ex)
         {
@@ -422,6 +464,9 @@ public static partial class ApplyService
 
     public static void ValidateRequest(ApplyRequest request)
     {
+        if (request.Layout.IsCustom && !request.Resolutions.SequenceEqual(request.Layout.ComputeDefaultSegmentSizes(
+                request.Physical.CurrentWidth, request.Physical.CurrentHeight)))
+            throw new ApplyException("자유 분할의 칸 크기와 자르기 정보가 일치하지 않습니다. 편집 설정을 다시 확인해 주세요.");
         if (request.PrimarySlot < 1 || request.PrimarySlot > request.Layout.SegmentCount)
             throw new ApplyException("주 화면은 현재 분할 칸 중에서 선택해야 합니다.");
         if (request.HidePhysicalDisplay && string.IsNullOrWhiteSpace(request.Physical.MonitorDevicePath))

@@ -80,6 +80,7 @@ struct App {
     WindowRescuer                                rescuer;
 
     HANDLE      stopEvent = nullptr;      // DESKSPLIT_COMPOSITOR_STOP_EVENT
+    HANDLE      readyEvent = nullptr;
     HANDLE      quitWatcher = nullptr;    // signals the watcher thread to exit
     std::thread watcherThread;
 };
@@ -145,8 +146,8 @@ void OnSuspendStateChanged(void* context, bool suspended, SuspendReason why) {
             ::ShowWindow(app->hwnd, SW_SHOWNOACTIVATE);
             ApplyWindowPlacement(*app);
         }
-        if (app->opt.confine) {
-            app->confiner.Configure(app->config.physicalDevice);
+        if (app->opt.confine && !app->specialized) {
+            app->confiner.Configure(app->config, [app] { return app->renderer.Routing(); });
             app->confiner.InstallHook();
         }
         DS_LOG(L"resume: compositor shown, cursor confinement re-armed");
@@ -159,12 +160,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (wParam == 0) return static_cast<LRESULT>(app->renderer.Routing());
         if (wParam == 2) return static_cast<LRESULT>(LayoutFingerprint(app->config));
         // No pointers cross the process boundary. Both maps include a protocol signature.
-        if (wParam == 1) {
-            const uint64_t payload = static_cast<uint64_t>(lParam);
-            const uint32_t expected = static_cast<uint32_t>(payload >> 32);
-            const uint32_t desired = static_cast<uint32_t>(payload);
-            if (!app->session.IsSuspended() && app->renderer.ExchangeRouting(expected, desired))
+        if ((static_cast<uint64_t>(wParam) & 0xFFFFFF0000000000ull) == kLayoutSignature) {
+            const uint64_t expected = static_cast<uint64_t>(lParam);
+            const uint64_t desired = static_cast<uint64_t>(wParam);
+            if (!app->session.IsSuspended() && app->renderer.ExchangeRouting(expected, desired)) {
+                if (app->opt.confine && !app->specialized) app->confiner.Refresh();
+                app->rescuer.OnDisplayChange();
                 return static_cast<LRESULT>(desired);
+            }
         }
         return 0;
     }
@@ -366,10 +369,14 @@ int Run(HINSTANCE hinst, const Options& opt) {
     app.opt = opt;
     g_app = &app;
     app.stopEvent = OpenOrCreateStopEvent();
+    const std::wstring readyName = std::wstring(DESKSPLIT_COMPOSITOR_READY_PREFIX) + std::to_wstring(::GetCurrentProcessId());
+    app.readyEvent = ::CreateEventW(nullptr, TRUE, FALSE, readyName.c_str());
     struct StopGuard {
         App& app;
-        ~StopGuard() { StopWatcher(app); g_app = nullptr; }
+        ~StopGuard() { StopWatcher(app); if (app.readyEvent) ::CloseHandle(app.readyEvent); g_app = nullptr; }
     } stopGuard{app};
+    if (!app.readyEvent) return exitcode::kRendererFailed;
+    ::ResetEvent(app.readyEvent);
     app.renderer.SetStopEvent(app.stopEvent);
 
     if (!LoadConfig(opt.configPath, app.config)) {
@@ -445,7 +452,7 @@ int Run(HINSTANCE hinst, const Options& opt) {
     }
 
     if (app.opt.confine && !specializedActive) {
-        app.confiner.Configure(app.config.physicalDevice);
+        app.confiner.Configure(app.config, [&app] { return app.renderer.Routing(); });
         if (!app.confiner.InstallHook()) {
             // Exclusion is hook-only, so no hook means no confinement. Carry on
             // rather than degrading cursor movement with a bad ClipCursor.
@@ -456,9 +463,9 @@ int Run(HINSTANCE hinst, const Options& opt) {
     }
 
     if (app.opt.rescue && !specializedActive) {
-        // Segment 1 is the relocation target: config segments[0].
-        app.rescuer.Start(app.config.physicalDevice,
-                          app.config.segments[0].virtualDevice);
+        std::vector<std::wstring> targets;
+        for (const auto& segment : app.config.segments) targets.push_back(segment.virtualDevice);
+        app.rescuer.Start(app.config.physicalDevice, targets);
     } else if (!specializedActive) {
         DS_LOG(L"window rescuer disabled (--no-rescue)");
     }
@@ -469,7 +476,8 @@ int Run(HINSTANCE hinst, const Options& opt) {
 
     ::SetTimer(app.hwnd, kTimerId, kTimerPeriodMs, nullptr);
     StartStopWatcher(app);
-    app.renderer.StartThread();
+    if (!app.renderer.StartThread()) return exitcode::kRendererFailed;
+    ::SetEvent(app.readyEvent);
     DS_LOG(L"running");
 
     MSG msg = {};

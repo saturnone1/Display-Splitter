@@ -95,7 +95,7 @@ bool DeskSplitIsModeSane(const DESKSPLIT_MODE& Mode)
     {
         return false;
     }
-    if (Mode.RefreshMillihertz < DESKSPLIT_MIN_REFRESH_MHZ || Mode.RefreshMillihertz > DESKSPLIT_MAX_REFRESH_MHZ)
+    if (Mode.RefreshMillihertz < DESKSPLIT_MIN_REFRESH_MHZ)
     {
         return false;
     }
@@ -129,7 +129,9 @@ bool DeskSplitIsConfigValid(const DESKSPLIT_CONFIG& Config)
 
         for (UINT32 ModeIndex = 0; ModeIndex < Monitor.ModeCount; ++ModeIndex)
         {
-            if (!DeskSplitIsModeSane(Monitor.Modes[ModeIndex]))
+            DESKSPLIT_TIMING Timing = {};
+            const auto& Mode = Monitor.Modes[ModeIndex];
+            if (!DeskSplitComputeTiming(Mode.Width, Mode.Height, Mode.RefreshMillihertz, &Timing))
             {
                 return false;
             }
@@ -199,6 +201,10 @@ bool DeskSplitComputeTiming(UINT32 Width, UINT32 Height, UINT32 RefreshMillihert
     pTiming->VBlank = VBlank;
     pTiming->VBackPorch = VBlank - kRbVFrontPorch - VSyncWidth;
     pTiming->VTotal = Height + VBlank;
+    // DISPLAYCONFIG_RATIONAL cannot represent a frequency above UINT32_MAX Hz.
+    // Reject a real representation overflow rather than imposing a product refresh cap.
+    if (static_cast<UINT64>(RefreshMillihertz) * pTiming->VTotal > 0xFFFFFFFFull * 1000ull)
+        return false;
 
     // ---- Pixel clock -----------------------------------------------------
     // pixelClock[Hz] = hTotal * vTotal * refresh[Hz]

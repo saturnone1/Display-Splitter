@@ -36,6 +36,9 @@ public sealed class AppSettings
     [JsonPropertyName("layout")]
     public LayoutKind Layout { get; set; } = LayoutKind.TwoVertical;
 
+    [JsonPropertyName("customLayoutCuts")]
+    public List<LayoutCut> CustomLayoutCuts { get; set; } = new();
+
     [JsonPropertyName("segments")]
     public List<SegmentSize> Segments { get; set; } = new();
 

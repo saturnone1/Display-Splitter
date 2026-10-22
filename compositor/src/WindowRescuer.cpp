@@ -16,8 +16,6 @@ WindowRescuer* g_instance = nullptr;
 constexpr DWORD kDebounceMs    = 300;   // LOCATIONCHANGE quiet period
 constexpr DWORD kRescueEveryMs = 5000;  // per-hwnd rate limit
 constexpr DWORD kRectsMaxAgeMs = 1000;  // lazy re-resolve of display geometry
-constexpr LONG  kMinRescueW = 100;      // ignore tiny transient popups
-constexpr LONG  kMinRescueH = 50;
 
 // Shell surfaces, menus, tooltips and flyouts: never relocate these.
 const wchar_t* const kExcludedClasses[] = {
@@ -27,7 +25,6 @@ const wchar_t* const kExcludedClasses[] = {
     L"Shell_SecondaryTrayWnd",
     L"NotifyIconOverflowWindow",
     L"TopLevelWindowForOverflowXamlIsland",
-    L"Windows.UI.Core.CoreWindow",
     L"Xaml_WindowedPopupClass",
     L"XamlExplorerHostIslandWindow",
     L"Windows.UI.Composition.DesktopWindowContentBridge",
@@ -96,11 +93,11 @@ WindowRescuer::~WindowRescuer() {
 }
 
 bool WindowRescuer::Start(const std::wstring& coveredDevice,
-                          const std::wstring& targetDevice) {
+                          const std::vector<std::wstring>& targetDevices) {
     if (m_thread.joinable()) return true;
 
     m_coveredDevice = coveredDevice;
-    m_targetDevice = targetDevice;
+    m_targetDevices = targetDevices;
     m_ownPid = ::GetCurrentProcessId();
     m_ready = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_instance = this;
@@ -149,11 +146,13 @@ void WindowRescuer::ThreadMain() {
     m_hookLocation = ::SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,
                                        EVENT_OBJECT_LOCATIONCHANGE, nullptr,
                                        EventProc, 0, 0, flags);
+    m_hookForeground = ::SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                                         nullptr, EventProc, 0, 0, flags);
 
-    const bool ok = m_hookShow || m_hookMoveSizeEnd || m_hookLocation;
+    const bool ok = m_hookShow || m_hookMoveSizeEnd || m_hookLocation || m_hookForeground;
     if (ok) {
-        DS_LOG(L"window rescuer watching '%s', relocating to '%s'",
-               m_coveredDevice.c_str(), m_targetDevice.c_str());
+        DS_LOG(L"window rescuer watching '%s', relocating across %zu split displays",
+               m_coveredDevice.c_str(), m_targetDevices.size());
     } else {
         DS_WARN(L"SetWinEventHook failed: %s - window rescuer inactive",
                 HrString(HRESULT_FROM_WIN32(::GetLastError())));
@@ -161,6 +160,11 @@ void WindowRescuer::ThreadMain() {
     if (m_ready) ::SetEvent(m_ready);
 
     if (ok) {
+        // Existing hidden windows produce neither SHOW nor LOCATIONCHANGE when
+        // the compositor starts. Evaluate them once without stealing focus.
+        ::EnumWindows([](HWND window, LPARAM self) -> BOOL {
+            reinterpret_cast<WindowRescuer*>(self)->Evaluate(window); return TRUE;
+        }, reinterpret_cast<LPARAM>(this));
         MSG msg = {};
         while (::GetMessageW(&msg, nullptr, 0, 0) > 0) {
             if (msg.message == WM_TIMER && m_debounceTimer != 0 &&
@@ -180,12 +184,17 @@ void WindowRescuer::ThreadMain() {
     if (m_hookShow)        { ::UnhookWinEvent(m_hookShow);        m_hookShow = nullptr; }
     if (m_hookMoveSizeEnd) { ::UnhookWinEvent(m_hookMoveSizeEnd); m_hookMoveSizeEnd = nullptr; }
     if (m_hookLocation)    { ::UnhookWinEvent(m_hookLocation);    m_hookLocation = nullptr; }
+    if (m_hookForeground)  { ::UnhookWinEvent(m_hookForeground);  m_hookForeground = nullptr; }
     m_pending.clear();
     m_lastRescue.clear();
     DS_VERB(L"window rescuer thread exiting");
 }
 
 void WindowRescuer::HandleEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild) {
+    if (event == EVENT_SYSTEM_FOREGROUND && hwnd) {
+        Evaluate(::GetAncestor(hwnd, GA_ROOT), true);
+        return;
+    }
     // Only whole top-level windows; ignoring caret/cursor/child accessibility
     // objects is what makes watching LOCATIONCHANGE affordable at all.
     if (hwnd == nullptr || idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
@@ -226,18 +235,21 @@ bool WindowRescuer::RefreshRects() {
     EnumerateMonitors(all);
 
     bool haveCovered = false;
-    bool haveTarget = false;
+    std::vector<RECT> targets;
+    m_monitorRects.clear();
     for (const MonitorEntry& e : all) {
+        m_monitorRects.push_back(e.rect);
         if (::_wcsicmp(e.device.c_str(), m_coveredDevice.c_str()) == 0) {
             m_coveredRect = e.rect;
             haveCovered = true;
         }
-        if (::_wcsicmp(e.device.c_str(), m_targetDevice.c_str()) == 0) {
-            m_targetWork = e.work;
-            haveTarget = true;
+        if (std::any_of(m_targetDevices.begin(), m_targetDevices.end(), [&](const auto& name) {
+                return ::_wcsicmp(e.device.c_str(), name.c_str()) == 0;
+            })) {
+            targets.push_back(e.work);
         }
     }
-    m_rectsValid = haveCovered && haveTarget && !RectIsEmpty(m_coveredRect) &&
+    m_rectsValid = haveCovered && targets.size() == m_targetDevices.size() && UnionOfRects(targets, m_targetWork) && !RectIsEmpty(m_coveredRect) &&
                    !RectIsEmpty(m_targetWork);
     m_rectsTick = now;
     return m_rectsValid;
@@ -262,8 +274,8 @@ bool WindowRescuer::RateLimit(HWND hwnd) {
 // Ordered cheapest-first: EVENT_OBJECT_SHOW fires for every window on the
 // system, and almost none of them are on the covered monitor, so the geometry
 // test runs before the class lookup and long before OpenProcess.
-bool WindowRescuer::ShouldRescue(HWND hwnd, RECT& windowRect) const {
-    if (!::IsWindow(hwnd) || !::IsWindowVisible(hwnd)) return false;
+bool WindowRescuer::ShouldRescue(HWND hwnd, RECT& windowRect, bool activated) const {
+    if (!::IsWindow(hwnd) || !::IsWindowVisible(hwnd) || ::IsIconic(hwnd)) return false;
 
     const LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
     const LONG_PTR ex = ::GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -273,11 +285,7 @@ bool WindowRescuer::ShouldRescue(HWND hwnd, RECT& windowRect) const {
 
     if (!::GetWindowRect(hwnd, &windowRect)) return false;
     if (RectIsEmpty(windowRect)) return false;
-    if ((windowRect.right - windowRect.left) < kMinRescueW ||
-        (windowRect.bottom - windowRect.top) < kMinRescueH) {
-        return false;
-    }
-    if (!IsMostlyInside(windowRect, m_coveredRect)) return false;
+    if (!NeedsWindowRescue(windowRect, m_coveredRect, m_monitorRects, activated)) return false;
 
     if (::GetAncestor(hwnd, GA_ROOT) != hwnd) return false;      // top-level only
     if (IsExcludedClass(hwnd)) return false;
@@ -286,12 +294,12 @@ bool WindowRescuer::ShouldRescue(HWND hwnd, RECT& windowRect) const {
     return true;
 }
 
-void WindowRescuer::Evaluate(HWND hwnd) {
+void WindowRescuer::Evaluate(HWND hwnd, bool activated) {
     if (!RefreshRects()) return;
 
     RECT wr = {};
-    if (!ShouldRescue(hwnd, wr)) return;
-    if (!RateLimit(hwnd)) return;
+    if (!ShouldRescue(hwnd, wr, activated)) return;
+    if (!activated && !RateLimit(hwnd)) return;
 
     wchar_t title[128] = {};
     ::GetWindowTextW(hwnd, title, _countof(title));
@@ -299,29 +307,28 @@ void WindowRescuer::Evaluate(HWND hwnd) {
     ::GetClassNameW(hwnd, cls, _countof(cls));
     const RECT before = wr;
 
-    const bool maximized = ::IsZoomed(hwnd) != FALSE;
-    if (maximized) {
-        // A maximized window cannot be moved; restore it, place the restored
-        // rect on the target monitor, then maximize again - it maximizes onto
-        // whichever monitor it now sits on.
-        ::ShowWindow(hwnd, SW_RESTORE);
-        if (!::GetWindowRect(hwnd, &wr)) return;
-    }
-
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    if (!::GetWindowPlacement(hwnd, &placement)) return;
+    const bool maximized = placement.showCmd == SW_SHOWMAXIMIZED;
+    // Read the restore size without synchronously unmaximizing a foreign app.
+    if (maximized) wr = placement.rcNormalPosition;
     const RECT place = ComputeRescuePlacement(m_targetWork, wr);
-    const int x = place.left;
-    const int y = place.top;
-    const int w = place.right - place.left;
-    const int h = place.bottom - place.top;
-
-    if (!::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)) {
-        DS_VERB(L"rescue of '%s' [%s] failed: %s", title, cls,
+    MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
+    if (!::GetMonitorInfoW(::MonitorFromRect(&place, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+    const LONG dx = monitor.rcWork.left - monitor.rcMonitor.left;
+    const LONG dy = monitor.rcWork.top - monitor.rcMonitor.top;
+    placement.rcNormalPosition = {place.left-dx, place.top-dy, place.right-dx, place.bottom-dy};
+    placement.flags = WPF_ASYNCWINDOWPLACEMENT;
+    placement.showCmd = maximized ? SW_SHOWMAXIMIZED : SW_SHOWNOACTIVATE;
+    placement.ptMaxPosition = {-1,-1};
+    if (!::SetWindowPlacement(hwnd, &placement)) {
+        DS_VERB(L"rescue request for '%s' [%s] failed: %s", title, cls,
                 HrString(HRESULT_FROM_WIN32(::GetLastError())));
         return;
     }
-    if (maximized) ::ShowWindow(hwnd, SW_MAXIMIZE);
-
-    DS_VERB(L"rescued '%s' [%s] from (%ld,%ld)-(%ld,%ld) to (%d,%d) %dx%d%s", title,
+    const int x=place.left, y=place.top, w=place.right-place.left, h=place.bottom-place.top;
+    DS_VERB(L"requested rescue of '%s' [%s] from (%ld,%ld)-(%ld,%ld) to (%d,%d) %dx%d%s", title,
             cls, before.left, before.top, before.right, before.bottom, x, y, w, h,
             maximized ? L" (re-maximized)" : L"");
 }

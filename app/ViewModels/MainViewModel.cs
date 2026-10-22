@@ -7,7 +7,7 @@ using DesktopSplitter.Services;
 
 namespace DesktopSplitter.ViewModels;
 
-public sealed class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject
 {
     /// <summary>The editor canvas is fitted into this box, preserving the monitor's aspect.</summary>
     private const double MaxCanvasWidth = 660;
@@ -28,16 +28,18 @@ public sealed class MainViewModel : ObservableObject
     private string? _preferredMonitorPath;
     private string? _preferredMonitorDevice;
     private bool _selectionPending;
-    private bool _isSplitEditorExpanded;
-    public bool IsSplitEditorExpanded { get => _isSplitEditorExpanded; set => SetProperty(ref _isSplitEditorExpanded, value); }
+    private bool _geometryValid = true;
+    private IReadOnlySet<int> _liveTargetNumbers = new HashSet<int>();
     public bool IsOriginalScreen => _hasDesktopStatus && !_liveSplit;
     public string OriginalScreenText => SelectedMonitor is null ? "원본 모니터를 확인할 수 없습니다."
         : $"{SelectedMonitor.DisplayLabel}\n{SelectedMonitor.CurrentWidth} × {SelectedMonitor.CurrentHeight}\n원본 화면";
     private string _livePhysicalPath = "";
     private LayoutKind _liveLayout;
     private bool MatchesActiveMatrix => _liveSplit && SelectedMonitor is not null && SelectedLayout is not null
+        && _liveTargetNumbers.Count == SelectedLayout.SegmentCount
         && !string.IsNullOrWhiteSpace(_livePhysicalPath) && string.Equals(_livePhysicalPath, SelectedMonitor.MonitorDevicePath, StringComparison.OrdinalIgnoreCase)
-        && _liveLayout == SelectedLayout.Kind;
+        && _liveLayout == SelectedLayout.Kind
+        && (!SelectedLayout.IsCustom || (_liveCustomCuts.SequenceEqual(SelectedLayout.CustomCuts)));
     private int _primarySlot = 1;
     private bool _rememberMatrixWindows = true;
     public bool IsActiveMatrix => MatchesActiveMatrix;
@@ -46,9 +48,9 @@ public sealed class MainViewModel : ObservableObject
     public string MatrixStateText => MatchesActiveMatrix ? "칸을 고른 뒤 ‘현재 그룹에 지정’을 눌러 확정하세요. 단축키는 바로 지정합니다."
         : !_hasDesktopStatus ? "화면 상태를 확인하고 있습니다."
         : !_liveSplit ? "원본 화면에는 선택 칸이 없습니다. 이전 선택 칸은 재분할할 때 사용합니다."
+        : _liveTargetNumbers.Count == 0 ? "화면 번호와 연결을 확인하지 못했습니다. 새로고침 후 다시 확인해 주세요."
         : "선택한 모니터·분할 방식은 실행 중인 그룹과 다릅니다.";
-    public IEnumerable<int> PrimaryChoices => MatchesActiveMatrix
-        ? Enumerable.Range(1, SelectedLayout?.SegmentCount ?? 1) : Enumerable.Empty<int>();
+    public ObservableCollection<int> PrimaryChoices { get; } = new();
     public int SelectedPrimarySlot {
         get => _primarySlot;
         set {
@@ -113,14 +115,20 @@ public sealed class MainViewModel : ObservableObject
         Zones = new ObservableCollection<ZoneVisual>();
         Splitters = new ObservableCollection<SplitterVisual>();
         Hiding = new HidingViewModel(() => SelectedMonitor, AppendStatus, previewOnly);
-        _refresh = new LatestRefresh<DesktopSnapshot>(() => Task.Run(statusReader ?? DesktopStatusReader.Read).WaitAsync(_lifetime.Token), snapshot => {
+        _refresh = new LatestRefresh<DesktopSnapshot>(() => Task.Run(statusReader ?? (() => DesktopStatusReader.Read(_lifetime.Token))).WaitAsync(_lifetime.Token), snapshot => {
             if (_closing) return;
             if (IsBusy) return; // Every display operation awaits a fresh snapshot after unlocking.
             bool wasSplit = _liveSplit;
-            bool firstStatus = !_hasDesktopStatus;
             _hasDesktopStatus = true;
             _liveSplit = snapshot.ActiveVirtualCount > 0;
-            if (firstStatus || wasSplit != _liveSplit) IsSplitEditorExpanded = _liveSplit;
+            var targets = snapshot.ActiveTargets ?? Array.Empty<SplitTarget>();
+            bool verified = string.IsNullOrEmpty(snapshot.RoutingIssue) && snapshot.ActiveVirtualCount is >= 1 and <= 9
+                && targets.Count == snapshot.ActiveVirtualCount
+                && targets.Select(target => target.Number).Order().SequenceEqual(Enumerable.Range(1, targets.Count))
+                && targets.All(target => !string.IsNullOrWhiteSpace(target.DeviceName))
+                && targets.Select(target => SplitWindowMover.NormalizeDevice(target.DeviceName)).Distinct().Count() == targets.Count;
+            _liveTargetNumbers = verified ? targets.Select(target => target.Number).ToHashSet() : new HashSet<int>();
+            _liveCustomCuts = snapshot.ActiveCustomCuts?.ToArray() ?? Array.Empty<LayoutCut>();
             bool sameGroup = wasSplit && _liveSplit && _liveLayout == snapshot.ActiveGroupLayout
                 && string.Equals(_livePhysicalPath, snapshot.ActiveGroupPath, StringComparison.OrdinalIgnoreCase);
             _livePhysicalPath = _liveSplit ? snapshot.ActiveGroupPath : "";
@@ -144,7 +152,8 @@ public sealed class MainViewModel : ObservableObject
             await RefreshMonitorsAsync(announce: true);
             if (!_closing) await Hiding.RefreshAsync();
         }, () => _initialized && !IsBusy && !_closing);
-        ResetSegmentsCommand = new RelayCommand(() => RebuildSegments(resetSizes: true),
+        InitializeFreeEditor();
+        ResetSegmentsCommand = new RelayCommand(() => { if (IsCustomLayout) { _cutVertical = null; SetCustomLayout(Array.Empty<LayoutCut>()); } else RebuildSegments(resetSizes: true); },
                                                 () => !IsBusy && SelectedLayout is not null);
         ApplyCommand = new RelayCommand(async () => await ApplyAsync().ConfigureAwait(false), () => CanApply);
         RevertCommand = new RelayCommand(async () => await RevertAsync().ConfigureAwait(false), () => _initialized && !_closing && !IsUiPreview && !IsBusy);
@@ -407,6 +416,7 @@ public sealed class MainViewModel : ObservableObject
             // not a user choice and must not rebuild segment sizes using a missing monitor.
             if (_suppressSegmentRebuild) return;
             if (!SetProperty(ref _selectedMonitor, value)) return;
+            ResetSplitterDrag();
             if (value is not null) {
                 _preferredMonitorPath = value.MonitorDevicePath;
                 _preferredMonitorDevice = value.DeviceName;
@@ -424,9 +434,13 @@ public sealed class MainViewModel : ObservableObject
         get => _selectedLayout;
         set
         {
+            if (_suppressSegmentRebuild) return;
             if (!SetProperty(ref _selectedLayout, value)) return;
+            if (!_changingFreeDraft) ResetSplitterDrag();
+            if (value?.IsCustom != true) _cutVertical = null;
             _selectionPending = false;
-            IsSplitEditorExpanded = true; // An explicit preset choice opens its draft editor.
+            OnPropertyChanged(nameof(IsCustomLayout));
+            OnPropertyChanged(nameof(EditorHint));
             RebuildSegments(resetSizes: true);
             RaiseCommandStates();
         }
@@ -509,6 +523,7 @@ public sealed class MainViewModel : ObservableObject
         _initialized && !_closing && !IsUiPreview && !IsBusy &&
         SelectedMonitor is not null &&
         SelectedLayout is not null &&
+        _geometryValid &&
         Segments.Count == SelectedLayout.SegmentCount &&
         Segments.All(s => s.IsValid);
 
@@ -645,12 +660,25 @@ public sealed class MainViewModel : ObservableObject
         int monW = monitor?.CurrentWidth ?? 1920;
         int monH = monitor?.CurrentHeight ?? 1080;
 
+        IReadOnlyList<(int Width, int Height)> defaults;
+        try {
+            defaults = layout.ComputeDefaultSegmentSizes(monW, monH);
+            _geometryValid = true;
+        } catch (ArgumentException error) {
+            _geometryValid = false;
+            ResetSplitterDrag();
+            foreach (var old in Segments) old.Changed -= OnSegmentChanged;
+            Segments.Clear(); Zones.Clear(); Splitters.Clear();
+            SumNote = "현재 모니터에서 이 분할을 표시할 수 없습니다. 자르기를 취소하거나 초기화해 주세요. " + error.Message;
+            NotifyMatrixState();
+            RaiseCommandStates();
+            return;
+        }
         bool reuse = !resetSizes && Segments.Count == layout.SegmentCount;
 
         // Per-layout defaults: most layouts subdivide equally, the 16:9-centre preset computes
         // a true 16:9 middle segment instead.
         if (!reuse) {
-            IReadOnlyList<(int Width, int Height)> defaults = layout.ComputeDefaultSegmentSizes(monW, monH);
             foreach (SegmentViewModel old in Segments) old.Changed -= OnSegmentChanged;
             Segments.Clear();
             for (int i = 0; i < layout.SegmentCount; i++) {
@@ -727,6 +755,7 @@ public sealed class MainViewModel : ObservableObject
 
     private void RebuildSplitters(LayoutDefinition layout, IReadOnlyList<ZoneRect> rects)
     {
+        if (layout.IsCustom) { RebuildFreeSplitters(); return; }
         int expected = layout.VerticalSplitLines.Count + layout.HorizontalSplitLines.Count;
         if (Splitters.Count != expected || !SplittersMatch(layout))
         {
@@ -794,6 +823,7 @@ public sealed class MainViewModel : ObservableObject
     private void UpdateSumNote(LayoutDefinition layout, IReadOnlyList<(int Width, int Height)> sizes,
                                int monW, int monH)
     {
+        if (layout.IsCustom) { SumNote = ""; return; }
         LayoutGeometry.Tracks tracks = LayoutGeometry.ComputeTracks(layout, sizes);
         int sumW = tracks.ColumnWidths.Sum();
         int sumH = tracks.RowHeights.Sum();
@@ -823,6 +853,12 @@ public sealed class MainViewModel : ObservableObject
         SplitterVisual? splitter = Splitters.FirstOrDefault(s => s.Id == splitterId);
         if (splitter is null) return;
 
+        if (layout.IsCustom) {
+            _dragSplitter = splitter;
+            _dragGrabOffset = (splitter.IsVertical ? canvasX : canvasY)
+                - (splitter.IsVertical ? splitter.X : splitter.Y) - SplitterVisual.Thickness / 2;
+            return;
+        }
         var sizes = Segments.Select(s => (s.Width, s.Height)).ToList();
         LayoutGeometry.Tracks tracks = LayoutGeometry.ComputeTracks(layout, sizes);
 
@@ -847,7 +883,7 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>
     /// Moves the captured splitter to an absolute canvas position. Working from the absolute
     /// pointer position (rather than accumulating per-move deltas) means clamping at the
-    /// 640 px limit cannot desynchronise the bar from the cursor.
+    /// positive-size boundary cannot desynchronise the bar from the cursor.
     /// </summary>
     public void UpdateSplitterDrag(double canvasX, double canvasY)
     {
@@ -855,6 +891,7 @@ public sealed class MainViewModel : ObservableObject
         LayoutDefinition? layout = SelectedLayout;
         MonitorInfo? monitor = SelectedMonitor;
         if (splitter is null || layout is null || monitor is null) return;
+        if (layout.IsCustom) { DragFreeSplitter(splitter, canvasX, canvasY); return; }
         if (_dragTracks.Length < splitter.Line + 2) return;
 
         double canvasExtent = splitter.IsVertical ? CanvasWidth : CanvasHeight;
@@ -888,13 +925,18 @@ public sealed class MainViewModel : ObservableObject
     public void EndSplitterDrag()
     {
         if (_dragSplitter is null) return;
-        _dragSplitter = null;
-        _dragTracks = Array.Empty<int>();
+        ResetSplitterDrag();
         RebuildEditor();
         RaiseCommandStates();
     }
 
     public bool IsDragging => _dragSplitter is not null;
+
+    private void ResetSplitterDrag()
+    {
+        _dragSplitter = null;
+        _dragTracks = Array.Empty<int>();
+    }
 
     /// <summary>
     /// Pushes track sizes back into the segment editors (and therefore the text boxes).
@@ -936,6 +978,9 @@ public sealed class MainViewModel : ObservableObject
         MonitorInfo physical = SelectedMonitor!;
         LayoutDefinition layout = SelectedLayout!;
         var resolutions = Segments.Select(s => (s.Width, s.Height)).ToList();
+        int primarySlot = SelectedPrimarySlot;
+        MatrixSnapshot? priorMatrix = null;
+        MatrixRestorePlan? nextMatrix = null;
 
         using var cancellation = BeginOperation(DisplayOperationState.Applying);
         var state = new Progress<DisplayOperationState>(value => {
@@ -946,13 +991,19 @@ public sealed class MainViewModel : ObservableObject
             Physical = physical,
             Layout = layout,
             Resolutions = resolutions,
-            PrimarySlot = SelectedPrimarySlot,
+            PrimarySlot = primarySlot,
             HidePhysicalDisplay = Hiding.IntentOn,
             SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.ToList()),
             PromptToConfirm = promptToConfirm,
             Confirmer = _applyConfirmer,
             ConfirmationSeconds = SafetyConfirmationSeconds,
             State = state,
+            OnTopologyReady = promptToConfirm ? () => SplitMatrixWorkspace.RestoreSplit(nextMatrix, primarySlot, _progress, cancellation.Token) : null,
+            OnRolledBack = promptToConfirm ? () => {
+                if (priorMatrix is not null)
+                    SplitMatrixWorkspace.RestoreSplit(new MatrixRestorePlan(priorMatrix, priorMatrix.Windows.Select(window => window.Identity).ToHashSet()), priorMatrix.PrimarySlot, _progress, CancellationToken.None);
+                else SplitMatrixWorkspace.RestoreMerged(nextMatrix, _progress, CancellationToken.None);
+            } : null,
         };
 
         IsBusy = true;
@@ -961,15 +1012,10 @@ public sealed class MainViewModel : ObservableObject
         {
             ApplyResult result = await Task.Run(() => {
                 using var operation = ApplyService.UserOperationGate.Enter(cancellation.Token);
-                ApplyService.CheckPrerequisites();
-                MatrixSnapshot? prior = promptToConfirm ? SplitMatrixWorkspace.Capture(_progress) : null;
-                var restore = promptToConfirm ? SplitMatrixWorkspace.PrepareRestore(physical.MonitorDevicePath, layout.Kind, _progress) : null;
-                var applied = ApplyService.Apply(request, _progress, cancellation.Token);
-                if (promptToConfirm && !applied.RolledBack)
-                    SplitMatrixWorkspace.RestoreSplit(restore, request.PrimarySlot, _progress, cancellation.Token);
-                else if (applied.RolledBack && prior is not null)
-                    SplitMatrixWorkspace.RestoreSplit(new MatrixRestorePlan(prior, prior.Windows.Select(window => window.Identity).ToHashSet()), prior.PrimarySlot, _progress, cancellation.Token);
-                return applied;
+                ApplyService.CheckPrerequisites(cancellation.Token);
+                priorMatrix = promptToConfirm ? SplitMatrixWorkspace.Capture(_progress) : null;
+                nextMatrix = promptToConfirm ? SplitMatrixWorkspace.PrepareRestore(physical.MonitorDevicePath, layout.Kind, _progress, layout.SegmentCount) : null;
+                return ApplyService.Apply(request, _progress, cancellation.Token);
             })
                                            .ConfigureAwait(true);
             AppendStatus(result.RolledBack
@@ -1070,7 +1116,9 @@ public sealed class MainViewModel : ObservableObject
     private async Task SetPrimaryCoreAsync(int slot)
     {
         if (IsUiPreview || IsBusy || _closing || !_initialized || SelectedMonitor is null || SelectedLayout is null) return;
+        if (_liveSplit && _liveTargetNumbers.Count == 0) { AppendStatus("화면 번호와 연결을 확인하지 못해 선택 칸을 변경하지 않았습니다. 새로고침 후 다시 시도해 주세요."); return; }
         if (!MatchesActiveMatrix) { AppendStatus("선택한 모니터·분할 방식과 실행 중인 그룹이 다릅니다. 다른 그룹의 선택 칸은 변경하지 않았습니다."); return; }
+        if (!_liveTargetNumbers.Contains(slot)) { AppendStatus($"실행 중인 분할 화면 {slot}번이 없습니다."); return; }
         string path = SelectedMonitor.MonitorDevicePath;
         var layout = SelectedLayout.Kind;
         using var cancellation = BeginOperation(DisplayOperationState.Reordering);
@@ -1143,7 +1191,8 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(IsActiveMatrix));
         OnPropertyChanged(nameof(DisplayStateText));
         OnPropertyChanged(nameof(MatrixStateText));
-        OnPropertyChanged(nameof(PrimaryChoices));
+        SnapshotCollection.Update(PrimaryChoices, MatchesActiveMatrix
+            ? Enumerable.Range(1, SelectedLayout?.SegmentCount ?? 1).ToArray() : Array.Empty<int>());
         OnPropertyChanged(nameof(SelectedPrimarySlot));
         foreach (var zone in Zones) zone.IsPrimary = MatchesActiveMatrix && zone.Number == _liveSelectedSlot;
     }
@@ -1157,6 +1206,7 @@ public sealed class MainViewModel : ObservableObject
         SetPrimaryCommand.RaiseCanExecuteChanged();
         RefreshMonitorsCommand.RaiseCanExecuteChanged();
         ResetSegmentsCommand.RaiseCanExecuteChanged();
+        RaiseFreeEditorCommands();
     }
 
     // ------------------------------------------------------------------ settings
@@ -1202,6 +1252,11 @@ public sealed class MainViewModel : ObservableObject
         MonitorInfo? monitor = MonitorSelection.Find(Monitors, settings.PhysicalMonitorPath, settings.PhysicalDevice, settings.PhysicalFriendlyName);
         if (monitor is null) return false;
 
+        LayoutDefinition restored;
+        try {
+            restored = LayoutDefinition.FromKind(settings.Layout, settings.CustomLayoutCuts);
+            restored.ComputePhysRects(monitor.CurrentWidth, monitor.CurrentHeight);
+        } catch (ArgumentException error) { AppendStatus("저장된 자유 분할 정보를 불러오지 못했습니다: " + error.Message); return false; }
         _suppressSegmentRebuild = true;
         try
         {
@@ -1209,16 +1264,22 @@ public sealed class MainViewModel : ObservableObject
             _preferredMonitorPath = monitor.MonitorDevicePath;
             _preferredMonitorDevice = monitor.DeviceName;
             _selectionPending = false;
-            _selectedLayout = LayoutDefinition.FromKind(settings.Layout);
+            if (restored.IsCustom) {
+                int index = Layouts.ToList().FindIndex(item => item.IsCustom);
+                Layouts[index] = restored;
+            }
+            _selectedLayout = restored;
         }
         finally { _suppressSegmentRebuild = false; }
 
         OnPropertyChanged(nameof(SelectedMonitor));
         OnPropertyChanged(nameof(SelectedLayout));
+        OnPropertyChanged(nameof(IsCustomLayout));
+        OnPropertyChanged(nameof(EditorHint));
         UpdateModeTexts();
         RebuildSegments(resetSizes: true);
 
-        if (settings.Segments.Count == Segments.Count)
+        if (!restored.IsCustom && settings.Segments.Count == Segments.Count)
         {
             _editorSuspended = true;
             try

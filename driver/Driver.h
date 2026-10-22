@@ -130,8 +130,7 @@ namespace DesktopSplitter
         // the first call does anything.
         void InitAdapter();
 
-        // Called from EvtIddCxAdapterInitFinished. Replays the persisted (or
-        // pending) configuration.
+        // Called from EvtIddCxAdapterInitFinished. Replays persisted configuration.
         void OnAdapterInitFinished(_In_ IDDCX_ADAPTER AdapterObject, _In_ NTSTATUS InitStatus);
 
         // IOCTL_DESKSPLIT_SET_CONFIG. Validates, diffs against the live state,
@@ -141,6 +140,7 @@ namespace DesktopSplitter
 
         // IOCTL_DESKSPLIT_GET_STATUS.
         void GetStatus(_Out_ DESKSPLIT_STATUS* pStatus);
+        void GetDiagnostics(_Out_ DESKSPLIT_DIAGNOSTICS* pDiagnostics);
 
     private:
         NTSTATUS CreateMonitorLocked(_In_ UINT32 MonitorIndex, _In_ const DESKSPLIT_MONITOR_CONFIG& Config);
@@ -162,9 +162,7 @@ namespace DesktopSplitter
 
         bool m_AdapterInitStarted;
         bool m_AdapterReady;
-
-        bool m_HasPendingConfig;
-        DESKSPLIT_CONFIG m_PendingConfig;
+        NTSTATUS m_AdapterInitStatus;
 
         MonitorSlot m_Slots[DESKSPLIT_MAX_MONITORS];
 

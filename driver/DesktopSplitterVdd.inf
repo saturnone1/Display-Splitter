@@ -16,10 +16,10 @@ CatalogFile=DesktopSplitterVdd.cat
 DriverVer= ; set by stampinf during the build
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$.10.0...17763
+%ManufacturerName%=Standard,NT$ARCH$.10.0...18362
 
-; IddCx 1.4 requires Windows 10 version 1809 (build 17763) or later.
-[Standard.NT$ARCH$.10.0...17763]
+; Minimum IddCx 1.4 runtime: Windows 10 version 1903 (build 18362).
+[Standard.NT$ARCH$.10.0...18362]
 %DeviceName%=DesktopSplitterVdd_Install, Root\DesktopSplitterVdd
 
 [SourceDisksFiles]
@@ -31,13 +31,9 @@ DesktopSplitterVdd.dll=1
 ; =================== UMDF Device ==================================
 
 [DesktopSplitterVdd_Install.NT]
-Include=WUDFRD.inf
-Needs=WUDFRD.NT
 CopyFiles=UMDriverCopy
 
 [DesktopSplitterVdd_Install.NT.hw]
-Include=WUDFRD.inf
-Needs=WUDFRD.NT.HW
 AddReg=DesktopSplitterVdd_HardwareDeviceSettings
 
 [DesktopSplitterVdd_HardwareDeviceSettings]
@@ -52,8 +48,17 @@ HKR,,"DeviceCharacteristics",%REG_DWORD%,0x0100
 HKR,,"Security",,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
 
 [DesktopSplitterVdd_Install.NT.Services]
-Include=WUDFRD.inf
-Needs=WUDFRD.NT.Services
+; WUDFRD.inf exists only on Windows 11. Explicit reflector registration works
+; on Windows 10 and 11. Preserve existing shared service settings (0x1f8)
+; and associate the reflector with this device (0x2).
+AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
+
+[WUDFRD_ServiceInstall]
+DisplayName=%WUDFRDServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\WUDFRd.sys
 
 [DesktopSplitterVdd_Install.NT.Wdf]
 UmdfService=DesktopSplitterVdd,DesktopSplitterVdd_Service_Install
@@ -78,6 +83,7 @@ DesktopSplitterVdd.dll
 ManufacturerName="DesktopSplitter"
 DiskName="DesktopSplitter Driver Installation Disk"
 DeviceName="DesktopSplitter Virtual Display"
+WUDFRDServiceName="Windows Driver Frameworks - User-mode Driver Framework Reflector"
 
 REG_MULTI_SZ = 0x00010000
 REG_SZ       = 0x00000000

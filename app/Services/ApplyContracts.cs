@@ -58,6 +58,9 @@ public sealed record AppliedSnapshot(
     bool HidePhysicalDisplay)
 {
     public int PrimarySlot { get; init; } = 1; // Matrix representative only, never Windows primary selection.
+    public IReadOnlyList<LayoutCut> CustomCuts { get; init; } = Array.Empty<LayoutCut>();
+    public IReadOnlyList<int>? RoutingOrder { get; init; }
+    public string PhysicalMonitorPath { get; init; } = "";
     public static readonly AppliedSnapshot None =
         new(false, string.Empty, LayoutKind.TwoVertical, Array.Empty<(int, int)>(), false);
 }
@@ -85,6 +88,8 @@ public sealed class ApplyRequest
 
     /// <summary>Required when PromptToConfirm is true; missing confirmation fails preflight.</summary>
     public IApplyConfirmer? Confirmer { get; init; }
+    public Action? OnTopologyReady { get; init; }
+    public Action? OnRolledBack { get; init; }
     public int ConfirmationSeconds { get; init; } = AppSettings.DefaultSafetyConfirmationSeconds;
     public IProgress<DisplayOperationState>? State { get; init; }
 }

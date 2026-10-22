@@ -46,7 +46,8 @@ public sealed class ShortcutSettingsViewModel : ObservableObject
     private bool _enabled;
     private string _status = "단축키가 꺼져 있습니다. 변경한 설정은 저장 후 적용됩니다.";
     public ObservableCollection<ShortcutRowViewModel> Rows { get; }
-    public IEnumerable<ShortcutRowViewModel> ArrangementRows => Rows.Where(r => ShortcutSettings.ArrangementNumber(r.Action).HasValue);
+    public IEnumerable<ShortcutRowViewModel> ArrangementRows => Rows.Where(r => ShortcutSettings.ArrangementNumber(r.Action).HasValue)
+        .OrderBy(r => ShortcutSettings.ArrangementNumber(r.Action));
     public IEnumerable<ShortcutRowViewModel> PrimaryRows => Rows.Where(r => ShortcutSettings.PrimaryNumber(r.Action).HasValue)
         .OrderBy(r => ShortcutSettings.PrimaryNumber(r.Action));
     public IEnumerable<ShortcutRowViewModel> AppRows => Rows.Where(r => r.Action is ShortcutAction.ShowApp or ShortcutAction.Apply or ShortcutAction.Revert);
@@ -64,11 +65,17 @@ public sealed class ShortcutSettingsViewModel : ObservableObject
         _load = load ?? SettingsStore.Load;
         _save = save ?? (desired => SettingsStore.Update(current => current.Shortcuts = desired.Shortcuts.Copy()));
         _current = (_load()?.Shortcuts ?? new ShortcutSettings()).Copy();
-        if (!ShortcutChord.Validate(_current, out _, out string error))
-        {
-            _current = new();
-            _status = "저장된 단축키를 사용할 수 없어 기본값으로 표시합니다: " + error;
-        }
+        var used = new HashSet<ShortcutChord>();
+        int invalid = 0;
+        foreach (var action in ShortcutSettings.Actions)
+            if (!_current.DisabledActions.Contains(action)
+                && (!ShortcutChord.TryParse(_current.Bindings[action], out var chord, out _) || !used.Add(chord)))
+            {
+                _current.DisabledActions.Add(action);
+                invalid++;
+            }
+        if (invalid > 0)
+            _status = $"잘못되었거나 중복된 단축키 {invalid}개만 사용 해제했습니다. 기존 키 조합을 확인한 뒤 저장해 주세요.";
         else if (_current.Enabled) _status = "저장된 단축키 설정을 등록할 준비가 되었습니다.";
         _enabled = _current.Enabled;
         Rows = new(ShortcutSettings.Actions.Select(action => new ShortcutRowViewModel(action, _current.Bindings[action])
@@ -124,9 +131,9 @@ public sealed class ShortcutSettingsViewModel : ObservableObject
     private void Save()
     {
         if (_previewOnly) return;
-        var desired = new ShortcutSettings { Enabled = Enabled, NumberKeyVersion = 4, Bindings = Rows.ToDictionary(row => row.Action, row => row.Gesture),
+        var desired = new ShortcutSettings { Enabled = Enabled, NumberKeyVersion = ShortcutSettings.CurrentVersion, Bindings = Rows.ToDictionary(row => row.Action, row => row.Gesture),
             DisabledActions = Rows.Where(row => !row.Enabled).Select(row => row.Action).ToHashSet() };
-        if (!ShortcutChord.Validate(desired, out _, out string validation)) { Status = validation; return; }
+        if (desired.Enabled && !ShortcutChord.Validate(desired, out _, out string validation)) { Status = validation; return; }
         string? error = _configure?.Invoke(desired);
         if (error is not null) { Status = error; _log(error); return; }
         try

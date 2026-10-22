@@ -39,6 +39,7 @@ public sealed class SettingsFile
             var settings = JsonSerializer.Deserialize<AppSettings>(text.ReadToEnd(), Options);
             if (settings is null) return null;
             settings.Segments ??= new();
+            settings.CustomLayoutCuts ??= new();
             settings.Shortcuts ??= new();
             settings.SpecializationHashes ??= new();
             settings.PhysicalDevice ??= "";
@@ -47,7 +48,7 @@ public sealed class SettingsFile
             settings.MatrixPrimarySlots ??= new();
             settings.MatrixMemories.RemoveAll(snapshot => snapshot is null);
             foreach (var matrix in settings.MatrixMemories) matrix.Windows ??= new();
-            settings.PrimarySegmentSlot = Math.Clamp(settings.PrimarySegmentSlot, 1, 4);
+            settings.PrimarySegmentSlot = Math.Clamp(settings.PrimarySegmentSlot, 1, 9);
             settings.PhysicalFriendlyName ??= "";
             settings.PreviousPrimaryDevice ??= "";
             settings.PreviousPrimaryFriendlyName ??= "";

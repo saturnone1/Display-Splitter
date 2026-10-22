@@ -30,13 +30,13 @@ namespace
             SystemTime.wSecond);
     }
 
-    HCERTSTORE OpenLocalMachineStore(const wchar_t* StoreName)
+    HCERTSTORE OpenLocalMachineStore(const wchar_t* StoreName, bool AllowCreate = false)
     {
         return CertOpenStore(
             CERT_STORE_PROV_SYSTEM_W,
             0,
             0,
-            CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_OPEN_EXISTING_FLAG,
+            CERT_SYSTEM_STORE_LOCAL_MACHINE | (AllowCreate ? 0 : CERT_STORE_OPEN_EXISTING_FLAG),
             StoreName);
     }
 }
@@ -235,7 +235,9 @@ namespace DeskSplit
     _Use_decl_annotations_
     DWORD AddCertificateToStore(PCCERT_CONTEXT pCert, const wchar_t* StoreName)
     {
-        HCERTSTORE Store = OpenLocalMachineStore(StoreName);
+        // A clean Windows installation need not have materialized this store.
+        // OPEN_EXISTING is appropriate for removal, but prevents first use.
+        HCERTSTORE Store = OpenLocalMachineStore(StoreName, true);
         if (Store == nullptr)
         {
             return GetLastError();

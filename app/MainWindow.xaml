@@ -104,7 +104,8 @@
             <Border Width="{Binding W}" Height="{Binding H}" ClipToBounds="True"
                     Background="{DynamicResource SubtleFillColorSecondaryBrush}"
                     BorderBrush="{DynamicResource AccentButtonBackground}" BorderThickness="1"
-                    CornerRadius="3">
+                    CornerRadius="3" MouseLeftButtonDown="Zone_MouseLeftButtonDown">
+                <Viewbox Margin="4" Stretch="Uniform" StretchDirection="DownOnly">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                     <TextBlock Text="{Binding Number}" FontSize="30" FontWeight="Bold"
                                TextAlignment="Center" Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
@@ -133,6 +134,7 @@
                         </Border.Style>
                     </Border>
                 </StackPanel>
+                </Viewbox>
             </Border>
         </DataTemplate>
 
@@ -174,10 +176,10 @@
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="가로" VerticalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                         <TextBox Width="68" Margin="6,0,10,0"
-                                 Text="{Binding WidthText, UpdateSourceTrigger=PropertyChanged}"/>
+                                 Text="{Binding WidthText, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="{Binding DataContext.IsCustomLayout, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
                         <TextBlock Text="세로" VerticalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                         <TextBox Width="68" Margin="6,0,0,0"
-                                 Text="{Binding HeightText, UpdateSourceTrigger=PropertyChanged}"/>
+                                 Text="{Binding HeightText, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="{Binding DataContext.IsCustomLayout, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
                     </StackPanel>
                     <TextBlock Text="{Binding Error}" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
                                FontSize="10.5" Margin="0,5,0,0" TextWrapping="Wrap">
@@ -227,7 +229,7 @@
                         <ui:Button DockPanel.Dock="Right" Content="새로 고침" Command="{Binding RefreshMonitorsCommand}" Margin="8,0,0,0"/>
                         <TextBlock Text="{Binding CurrentModeText}" VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                     </DockPanel>
-                    <TextBlock Text="2. 다음 적용할 분할 방식" Style="{StaticResource SectionHeader}"/>
+                    <TextBlock Text="2. 분할 방식" Style="{StaticResource SectionHeader}"/>
                     <ListBox ItemsSource="{Binding Layouts}" SelectedItem="{Binding SelectedLayout}" ItemTemplate="{StaticResource LayoutItemTemplate}"
                              ItemContainerStyle="{StaticResource LayoutItemContainerStyle}" Background="Transparent" BorderThickness="0"
                              IsEnabled="{Binding IsIdle}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
@@ -235,25 +237,18 @@
                     </ListBox>
                 </StackPanel>
                 <StackPanel Grid.Column="2">
-                    <TextBlock Text="3. 화면 상태와 분할 설정" Style="{StaticResource SectionHeader}"/>
-                    <TextBlock Text="{Binding DisplayStateText}" TextWrapping="Wrap" Margin="0,0,0,6"/>
-                    <ItemsControl x:Name="LiveSlotsList" ItemsSource="{Binding CurrentSlots}" Margin="0,0,0,8" ToolTip="칸은 현재 배치 위치이며, 화면은 위치를 바꿔도 유지되는 분할 화면 번호입니다. 단축키로 변경한 실제 배치를 표시합니다.">
-                        <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,3,0,0"/></DataTemplate></ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    <Border x:Name="OriginalScreenPreview" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,6,0,14" Height="170">
-                        <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/>
-                            <Style.Triggers><DataTrigger Binding="{Binding IsOriginalScreen}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
-                        </Style></Border.Style>
-                        <TextBlock Text="{Binding OriginalScreenText}" TextAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" FontSize="16"/>
-                    </Border>
-                    <Expander x:Name="SplitEditorExpander" Header="다음 분할 설정 편집" IsExpanded="{Binding IsSplitEditorExpanded, Mode=TwoWay}" Margin="0,0,0,14">
-                    <StackPanel x:Name="SplitEditorContent" Margin="0,12,0,0">
-                        <StackPanel.Style><Style TargetType="StackPanel"><Setter Property="Visibility" Value="Collapsed"/>
-                            <Style.Triggers><DataTrigger Binding="{Binding IsSplitEditorExpanded}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
-                        </Style></StackPanel.Style>
+                    <TextBlock Text="3. 분할 설정 편집" Style="{StaticResource SectionHeader}"/>
+                    <StackPanel x:Name="SplitEditorContent" Margin="0,0,0,14">
                     <TextBlock Text="아래 번호와 크기는 다음 분할 적용을 위한 편집 설정입니다." TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
-                    <TextBlock Text="경계선을 끌거나 아래에 픽셀 크기를 입력하세요. 적용 전에는 실제 화면이 바뀌지 않습니다."
-                               TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,12"/>
+                    <TextBlock Text="{Binding EditorHint}" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,12"/>
+                    <WrapPanel Margin="0,0,0,10">
+                        <WrapPanel.Style><Style TargetType="WrapPanel"><Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers><DataTrigger Binding="{Binding IsCustomLayout}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+                        </Style></WrapPanel.Style>
+                        <ui:Button Content="세로로 자르기" Command="{Binding CutVerticalCommand}" Margin="0,0,8,6"/>
+                        <ui:Button Content="가로로 자르기" Command="{Binding CutHorizontalCommand}" Margin="0,0,8,6"/>
+                        <ui:Button Content="마지막 자르기 취소" Command="{Binding UndoCutCommand}" Margin="0,0,0,6"/>
+                    </WrapPanel>
                     <Border Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
                             BorderThickness="1" CornerRadius="8" Padding="16" IsEnabled="{Binding IsIdle}">
                         <Viewbox Stretch="Uniform" StretchDirection="DownOnly">
@@ -269,12 +264,11 @@
                     </Border>
                     <TextBlock Text="{Binding RefreshText}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
                     <TextBlock Text="{Binding SumNote}" Foreground="{DynamicResource SystemFillColorCautionBrush}" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/>
-                    <ItemsControl ItemsSource="{Binding Segments}" ItemTemplate="{StaticResource SegmentItemTemplate}" IsEnabled="{Binding IsIdle}" Margin="0,12,0,0">
+                    <ItemsControl ItemsSource="{Binding Segments}" IsEnabled="{Binding IsIdle}" ItemTemplate="{StaticResource SegmentItemTemplate}" Margin="0,12,0,0">
                         <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                     </ItemsControl>
-                    <ui:Button Content="선택한 분할의 기본 크기로" Command="{Binding ResetSegmentsCommand}" HorizontalAlignment="Left" Margin="0,0,0,16"/>
+                    <ui:Button Content="분할 초기화" Command="{Binding ResetSegmentsCommand}" HorizontalAlignment="Left" Margin="0,0,0,16"/>
                     </StackPanel>
-                    </Expander>
 
                     <Border x:Name="MatrixPanel" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,12" IsEnabled="{Binding IsIdle}">
                         <StackPanel>
@@ -324,7 +318,7 @@
                               IsEnabled="{Binding DataContext.IsIdle, RelativeSource={RelativeSource AncestorType={x:Type Window}}}">
                         <StackPanel Margin="0,12,0,0">
                             <ui:ToggleSwitch Content="전역 단축키 사용" IsChecked="{Binding Enabled}"/>
-                            <TextBlock Text="선택 칸 선택, 화면 배치 변경, 앱 열기, 분할 적용·복원의 키 조합을 아래에서 변경할 수 있습니다. 변경 후 설정을 저장해 주세요."
+                            <TextBlock Text="배치 변경과 선택 칸 지정은 각각 1~9번까지 지원합니다. 현재 분할에 없는 칸은 변경하지 않습니다. 키 조합은 아래에서 변경한 뒤 저장해 주세요."
                                        TextWrapping="Wrap" FontSize="12" Margin="0,8,0,12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                             <ItemsControl ItemsSource="{Binding ArrangementRows}" ItemTemplate="{StaticResource ShortcutRowTemplate}"/>
                             <Expander x:Name="WindowShortcutsExpander" Header="이 그룹의 선택 칸" Margin="0,4,0,10">

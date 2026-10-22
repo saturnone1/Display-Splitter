@@ -1,11 +1,11 @@
 // CursorConfine.h - keeps the OS cursor off the covered physical monitor.
 //
-// Exclusion-based, not inclusion-based: the only forbidden area is the covered
-// physical monitor's desktop rect. Every other monitor - virtual or real, in
-// any direction - stays freely reachable. See README.md for the rationale.
+// Maps the covered physical panel's logical edges to split capture desktops.
+// Other physical displays retain their original adjacency. No global cursor clip.
 #pragma once
 
 #include "Common.h"
+#include <functional>
 
 namespace ds {
 
@@ -17,17 +17,15 @@ public:
     CursorConfiner(const CursorConfiner&) = delete;
     CursorConfiner& operator=(const CursorConfiner&) = delete;
 
-    // 'physicalDevice' is the monitor the compositor covers - the single
-    // excluded region. Resolves display state and applies the policy.
-    bool Configure(const std::wstring& physicalDevice);
+    // Resolve capture sources and visible slots; routing is read atomically on each move.
+    bool Configure(const AppConfig& config, std::function<uint64_t()> routing);
 
-    // Re-resolves monitor rects and re-evaluates the ClipCursor decision.
+    // Re-resolves monitor rectangles after topology or slot-order changes.
     // Must be called on WM_DISPLAYCHANGE: making a virtual monitor primary
     // re-bases virtual-desktop coordinates, so every cached rect moves.
     void Refresh();
 
-    // Cheap re-assert from the 2 s timer. No-op unless we are in the rare
-    // single-rect ClipCursor mode (other apps can steal the clip).
+    // Compatibility no-op: never reassert a global clip.
     void Reapply();
 
     // Installs the WH_MOUSE_LL hook. Must be called on a thread that pumps
@@ -37,11 +35,12 @@ public:
 
     bool HookInstalled() const;
 
-    // Unhooks and drops any clip we applied.
+    // Unhooks and forgets pointer routing state.
     void Release();
 
 private:
-    std::wstring m_physicalDevice;
+    AppConfig m_config;
+    std::function<uint64_t()> m_routing;
     bool         m_configured = false;
 };
 

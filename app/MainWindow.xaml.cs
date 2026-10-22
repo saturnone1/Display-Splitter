@@ -209,12 +209,22 @@ public partial class MainWindow : Window, IHidingUi
                 case ShortcutAction.Primary2:
                 case ShortcutAction.Primary3:
                 case ShortcutAction.Primary4:
+                case ShortcutAction.Primary5:
+                case ShortcutAction.Primary6:
+                case ShortcutAction.Primary7:
+                case ShortcutAction.Primary8:
+                case ShortcutAction.Primary9:
                     await _viewModel.SetPrimaryAsync(ShortcutSettings.PrimaryNumber(action)!.Value);
                     break;
                 case ShortcutAction.Arrange1:
                 case ShortcutAction.Arrange2:
                 case ShortcutAction.Arrange3:
                 case ShortcutAction.Arrange4:
+                case ShortcutAction.Arrange5:
+                case ShortcutAction.Arrange6:
+                case ShortcutAction.Arrange7:
+                case ShortcutAction.Arrange8:
+                case ShortcutAction.Arrange9:
                     await _viewModel.ReorderDisplayAsync(ShortcutSettings.ArrangementNumber(action)!.Value);
                     break;
             }
@@ -278,6 +288,14 @@ public partial class MainWindow : Window, IHidingUi
     private static extern bool SetForegroundWindow(nint window);
 
     // ------------------------------------------------------------------ splitter dragging
+
+    private void Zone_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: ZoneVisual zone }) return;
+        Point p = e.GetPosition(EditorSurface);
+        _viewModel.CutAt(zone.Index, p.X, p.Y);
+        e.Handled = true;
+    }
 
     private void Splitter_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {

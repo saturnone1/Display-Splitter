@@ -86,7 +86,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'UI rendering checks failed' }
           dotnet run --project app/tools/ui-smoke/ui-smoke.csproj -c Release --no-build -- --state-checks
           if ($LASTEXITCODE -ne 0) { throw 'Read-only status checks failed' }
-          foreach ($scenario in @('--hiding-ui', '--error-reporter', '--shortcuts', '--appearance', '--stability')) {
+          foreach ($scenario in @('--hiding-ui', '--error-reporter', '--shortcuts', '--appearance', '--stability', '--refactor', '--matrix', '--matrix-ui', '--live-sync', '--win10-fixes', '--free-layout', '--confirmation-ui')) {
             dotnet run --project app/tools/ui-smoke/ui-smoke.csproj -c Release --no-build -- $scenario
             if ($LASTEXITCODE -ne 0) { throw "Experimental UI regression check failed: $scenario" }
           }
@@ -100,13 +100,18 @@ jobs:
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
-          foreach ($probe in @('GeometryProbe', 'PresenterProbe')) {
+          foreach ($probe in @('GeometryProbe', 'PresenterProbe', 'PointerProbe')) {
             & $msbuild "compositor\tests\$probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /v:m /nologo
             if ($LASTEXITCODE -ne 0) { throw "$probe build failed" }
             & "compositor\build\x64\Release\$probe.exe"
             if ($LASTEXITCODE -ne 0) { throw "$probe failed" }
           }
+          & $msbuild "driver\tests\ModeProbe.vcxproj" /p:Configuration=Release /p:Platform=x64 /v:m /nologo
+          if ($LASTEXITCODE -ne 0) { throw 'ModeProbe build failed' }
+          & "driver\build\x64\Release\ModeProbe.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'ModeProbe failed' }
           .\tools\check-native-dependencies.ps1
+          .\tools\Test-Win10DriverInf.ps1
 
       # -------------------------------------------------------------- check
       # CI runners execute elevated, so the shipping exe can run directly.

@@ -8,6 +8,7 @@
 
 #include "../src/Geometry.h"
 #include "../src/LiveLayout.h"
+#include "../src/PointerTopology.h"
 #include "../src/FrameTiming.h"
 
 #include <cstdio>
@@ -315,7 +316,72 @@ void TestRectBasics() {
 
 } // namespace
 
+void TestPointerTopology() {
+    for (int columns : {2,3}) for (bool reverse : {false,true}) {
+        PointerTopology t;
+        t.covered=R(-1920,-1080,0,0);
+        t.others={R(-3200,-1080,-1920,0),R(0,-1080,1280,0),R(-1920,-1980,0,-1080),R(-1920,0,0,900)};
+        const int w=1920/columns, h=1080/columns, count=columns*columns;
+        uint64_t routing=kLayoutSignature | (static_cast<uint64_t>(count)<<36);
+        for(int i=0;i<count;++i) {
+            t.sources.push_back(R(10000+(i%columns)*w,2000+(i/columns)*h,10000+(i%columns+1)*w,2000+(i/columns+1)*h));
+            t.slots.push_back(R((i%columns)*w,(i/columns)*h,(i%columns+1)*w,(i/columns+1)*h));
+            routing|=static_cast<uint64_t>(reverse?count-1-i:i)<<(i*4);
+        }
+        for(int slot=0;slot<count;++slot) {
+            const int source=reverse?count-1-slot:slot;
+            const auto r=t.sources[source]; const auto local=t.slots[slot];
+            POINT result{};
+            if(slot%columns==0) {
+                POINT edge=P(r.left,r.top+h/2), want=P(-1921,-1080+local.top+h/2);
+                CheckBool(RoutePointer(t,routing,P(edge.x+2,edge.y),edge,result),true,L"virtual to real left boundary");
+                CheckPoint(result,want,L"left neighbour keeps logical height after swap");
+                CheckBool(RoutePointer(t,routing,want,P(-1920,want.y),result),true,L"real to virtual left boundary");
+                CheckPoint(result,edge,L"left entry resolves current slot source");
+            }
+            if(slot%columns==columns-1) {
+                POINT edge=P(r.right-1,r.top+h/2), want=P(0,-1080+local.top+h/2);
+                CheckBool(RoutePointer(t,routing,P(edge.x-2,edge.y),edge,result),true,L"virtual to real right boundary");
+                CheckPoint(result,want,L"right neighbour keeps logical height after swap");
+                CheckBool(RoutePointer(t,routing,want,P(-1,want.y),result),true,L"real to virtual right boundary");
+                CheckPoint(result,edge,L"right entry resolves current slot source");
+            }
+            if(slot/columns==0) {
+                POINT edge=P(r.left+w/2,r.top), want=P(-1920+local.left+w/2,-1081);
+                CheckBool(RoutePointer(t,routing,P(edge.x,edge.y+2),edge,result),true,L"virtual to real top boundary");
+                CheckPoint(result,want,L"top neighbour keeps logical horizontal coordinate");
+                CheckBool(RoutePointer(t,routing,want,P(want.x,-1080),result),true,L"real to virtual top boundary");
+                CheckPoint(result,edge,L"top entry resolves current slot source");
+            }
+            if(slot/columns==columns-1) {
+                POINT edge=P(r.left+w/2,r.bottom-1), want=P(-1920+local.left+w/2,0);
+                CheckBool(RoutePointer(t,routing,P(edge.x,edge.y-2),edge,result),true,L"virtual to real bottom boundary");
+                CheckPoint(result,want,L"bottom neighbour keeps logical horizontal coordinate");
+                CheckBool(RoutePointer(t,routing,want,P(want.x,-1),result),true,L"real to virtual bottom boundary");
+                CheckPoint(result,edge,L"bottom entry resolves current slot source");
+            }
+        }
+        RECT group{}; UnionOfRects(t.sources,group);
+        const auto restored=ComputeRescuePlacement(group,R(-1800,-1000,-200,-100));
+        CheckBool(restored.right-restored.left==1600 && restored.bottom-restored.top==900,true,L"large rescued window spans split group without per-slot shrink");
+        CheckBool(NeedsWindowRescue(restored,t.covered,t.sources,true),false,L"window spanning split grid remains visible and untouched");
+        CheckBool(NeedsWindowRescue(R(-1800,-1000,-200,-100),t.covered,t.sources,false),true,L"window behind compositor needs rescue");
+        CheckBool(NeedsWindowRescue(R(-9000,-9000,-8000,-8000),t.covered,t.sources,false),false,L"inactive offscreen window is not moved");
+        CheckBool(NeedsWindowRescue(R(-9000,-9000,-8000,-8000),t.covered,t.sources,true),true,L"activated offscreen window is recovered");
+        CheckBool(NeedsWindowRescue(R(10,-1000,900,-100),t.covered,t.others,true),false,L"window on another real monitor remains untouched");
+        t.others={R(-3200,-800,-1920,0)};
+        const auto source0=t.sources[static_cast<size_t>(routing&15)]; POINT offsetResult{};
+        CheckBool(RoutePointer(t,routing,P(source0.left+2,source0.top+5),P(source0.left,source0.top+5),offsetResult),false,L"staggered neighbour does not invent a crossing outside shared edge");
+        CheckPoint(MapPoint(P(0,0),R(0,0,1,1),R(100,200,101,201)),P(100,200),L"one-pixel source is mapped without division by zero");
+        auto resized=t; resized.covered.right++;
+        CheckBool(ValidPointerTopology(resized,routing),false,L"stale physical resolution disables pointer mapping");
+        t.sources[0]={}; POINT result{};
+        CheckBool(RoutePointer(t,routing,P(-1921,-900),P(-1920,-900),result),false,L"partial topology cannot redirect input");
+    }
+}
+
 int wmain() {
+    TestPointerTopology();
     ::wprintf(L"dscomp geometry probe\n");
     ::wprintf(L"=====================\n");
 
@@ -330,18 +396,24 @@ int wmain() {
     TestRescuePlacement();
     TestUnionIsSingleRect();
 
-    CheckBool(IdentityRouting(4) == 0x445304E4u, true, L"live layout wire format");
+    CheckBool(IdentityRouting(4) == 0x4453004000003210ull, true, L"live layout wire format");
     CheckBool(ValidRouting(IdentityRouting(4), 4), true, L"identity routing valid");
-    CheckBool(ValidRouting(0x44530427u, 4), true, L"swap source zero and three");
-    CheckBool(ValidRouting(0x44530400u, 4), false, L"duplicate capture source rejected");
-    CheckBool(ValidRouting(0x445302E4u, 2), false, L"unused routing bits rejected");
-    CheckBool(ValidRouting(0x445304E4u, 3), false, L"stale segment count rejected");
-    std::atomic<uint32_t> routing{IdentityRouting(4)};
-    CheckBool(ExchangeRouting(routing, 4, 0x445304E4u, 0x44530427u), true, L"live slot swap committed");
-    CheckBool(ExchangeRouting(routing, 4, 0x445304E4u, 0x445304E4u), false, L"stale client swap rejected");
-    CheckBool(ExchangeRouting(routing, 4, 0x44530427u, 0x44530400u), false, L"invalid update rejected");
-    CheckBool(routing.load() == 0x44530427u, true, L"rejected update retained routing");
-    CheckBool(ExchangeRouting(routing, 4, 0x44530427u, 0x445304E4u), true, L"failed transaction routing rollback");
+    CheckBool(ValidRouting(0x4453004000000213ull, 4), true, L"swap source zero and three");
+    CheckBool(ValidRouting(0x4453004000000000ull, 4), false, L"duplicate capture source rejected");
+    CheckBool(ValidRouting(0x4453002000003210ull, 2), false, L"unused routing bits rejected");
+    CheckBool(ValidRouting(0x4453004000003210ull, 3), false, L"stale segment count rejected");
+    std::atomic<uint64_t> routing{IdentityRouting(4)};
+    CheckBool(ExchangeRouting(routing, 4, 0x4453004000003210ull, 0x4453004000000213ull), true, L"live slot swap committed");
+    CheckBool(ExchangeRouting(routing, 4, 0x4453004000003210ull, 0x4453004000003210ull), false, L"stale client swap rejected");
+    CheckBool(ExchangeRouting(routing, 4, 0x4453004000000213ull, 0x4453004000000000ull), false, L"invalid update rejected");
+    CheckBool(routing.load() == 0x4453004000000213ull, true, L"rejected update retained routing");
+    CheckBool(ExchangeRouting(routing, 4, 0x4453004000000213ull, 0x4453004000003210ull), true, L"failed transaction routing rollback");
+    CheckBool(IdentityRouting(9) == 0x4453009876543210ull, true, L"nine-slot wire format matches managed code");
+    CheckBool(ValidRouting(IdentityRouting(9),9), true, L"nine-slot identity valid");
+    CheckBool(ValidRouting(0x4453009012345678ull,9), true, L"nine-slot reversed order valid");
+    CheckBool(ValidRouting(IdentityRouting(9) | (0xFull << 32),9), false, L"ninth source bounds checked");
+    CheckBool(ValidRouting(IdentityRouting(9),8), false, L"nine-slot stale count rejected");
+    CheckBool(IdentityRouting(10)==0, true, L"protocol capacity guarded");
     AppConfig config;
     config.physicalDevice = L"P";
     for (int i = 0; i < 4; ++i) {

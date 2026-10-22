@@ -89,6 +89,7 @@ public sealed class GlobalShortcutService : IDisposable
     private readonly Dictionary<ShortcutAction, Registration> _registered = new();
     private int _nextId = BaseId;
     private bool _disposed;
+    private bool _acceptMessages;
     private readonly Dictionary<ShortcutAction, string> _errors = new();
     public IReadOnlyDictionary<ShortcutAction, string> RegistrationErrors => _errors;
     public IReadOnlyCollection<ShortcutAction> RegisteredActions => _registered.Keys;
@@ -103,7 +104,11 @@ public sealed class GlobalShortcutService : IDisposable
     public string? Configure(ShortcutSettings settings)
     {
         if (_disposed) return "단축키 서비스가 종료되었습니다.";
-        if (!ShortcutChord.Validate(settings, out var desired, out string error)) return error;
+        var desired = new Dictionary<ShortcutAction, ShortcutChord>();
+        if (settings.Enabled && !ShortcutChord.Validate(settings, out desired, out string error)) return error;
+        // Pause dispatch before touching native registrations. A failed unregister
+        // must never leave an action executable while the user edits a key.
+        _acceptMessages = false;
         if (!Clear()) return "기존 단축키를 해제하지 못했습니다. 앱을 종료한 뒤 다시 시도해 주세요.";
         _errors.Clear();
         if (!settings.Enabled) return null;
@@ -113,6 +118,7 @@ public sealed class GlobalShortcutService : IDisposable
             int code = _registrar.LastError;
             _errors[action] = $"{settings.Bindings[action]} 등록 실패 (오류 {code}) · 다른 앱과 충돌할 수 있습니다.";
         }
+        _acceptMessages = true;
         return null;
     }
 
@@ -138,7 +144,7 @@ public sealed class GlobalShortcutService : IDisposable
 
     public bool HandleMessage(int message, nint wParam, nint lParam)
     {
-        if (_disposed || message != MessageId) return false;
+        if (_disposed || !_acceptMessages || message != MessageId) return false;
         var match = _registered.FirstOrDefault(pair => pair.Value.Id == (int)wParam);
         if (match.Value.Id == 0) return false;
         var chord = match.Value.Chord;
@@ -149,7 +155,7 @@ public sealed class GlobalShortcutService : IDisposable
         return true;
     }
 
-    public void Dispose() { if (_disposed) return; Clear(); _disposed = true; }
+    public void Dispose() { if (_disposed) return; _acceptMessages = false; Clear(); _disposed = true; }
 
     private sealed class NativeRegistrar : IShortcutRegistrar
     {

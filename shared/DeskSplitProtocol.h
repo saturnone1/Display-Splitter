@@ -21,16 +21,22 @@ DEFINE_GUID(GUID_DEVINTERFACE_DESKSPLIT,
 // Hardware ID of the root-enumerated software device.
 #define DESKSPLIT_HARDWARE_ID L"Root\\DesktopSplitterVdd"
 
-#define DESKSPLIT_MAX_MONITORS      4
+#define DESKSPLIT_MAX_MONITORS      9
 #define DESKSPLIT_MAX_MODES         8   // per monitor
 
-#define DESKSPLIT_PROTOCOL_VERSION  1
+// v3 expands the configuration to nine outputs; v2 removed the 640-pixel floor.
+// The app requires a matching driver before sending the larger configuration.
+#define DESKSPLIT_PROTOCOL_VERSION  3
+
+
 
 // IOCTLs (FILE_DEVICE_UNKNOWN, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_DESKSPLIT_SET_CONFIG \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_DESKSPLIT_GET_STATUS \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_DESKSPLIT_GET_DIAGNOSTICS \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #pragma pack(push, 4)
 
@@ -60,16 +66,26 @@ typedef struct DESKSPLIT_STATUS {
     uint32_t ActiveMonitorCount;    // monitors currently arrived
 } DESKSPLIT_STATUS;
 
+// Optional read-only extension; does not change the configuration/status ABI.
+typedef struct DESKSPLIT_DIAGNOSTICS {
+    uint32_t Version;               // 1
+    uint32_t AdapterState;          // 0 not started, 1 initializing, 2 ready, 3 failed
+    int32_t AdapterInitStatus;      // NTSTATUS from adapter initialization
+} DESKSPLIT_DIAGNOSTICS;
+
 #pragma pack(pop)
 
 // Persisted config: the driver serializes the last DESKSPLIT_CONFIG it
 // received into a REG_BINARY value "Config" under its software key
-// (WdfDeviceOpenRegistryKey / PLUGPLAY_REGKEY_DRIVER) and replays it at
+// (WdfDeviceOpenRegistryKey / PLUGPLAY_REGKEY_DRIVER | WDF_REGKEY_DRIVER_SUBKEY)
+// in the UMDF service's private subkey and replays it at
 // adapter start so monitors survive reboot.
 #define DESKSPLIT_REG_CONFIG_VALUE L"Config"
 
 // Compositor stop event (control app signals this to shut the compositor down)
 #define DESKSPLIT_COMPOSITOR_STOP_EVENT L"Global\\DeskSplitCompositorStop"
+// Per-process event: initialization/routing window/render thread are ready, not merely Process.Start success.
+#define DESKSPLIT_COMPOSITOR_READY_PREFIX L"Local\\DeskSplitCompositorReady."
 
 #ifdef __cplusplus
 }

@@ -163,11 +163,151 @@ reproduction exposed this additional test-host defect; subsequent panel tests
 assert unchanged settings and active-monitor count. Physical hiding remains a
 separate, unperformed hardware test.
 
-### Remaining hardware review
+### Windows 10 driver discovery, FHD modes and matrix transitions (2026-10-20)
 
-1. Establish the Windows 10 21H2 test environment before claiming compatibility.
+The previous managed CM interface-list flag was `1`, which is
+`CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES`, not PRESENT (`0`) in the Windows SDK.
+Discovery now enumerates active interfaces, retries only the API's
+`CR_BUFFER_SMALL` resize race, and falls back to SetupDi PRESENT/device-interface
+enumeration. Connection tries all unique candidates using read-only GET_STATUS
+handshakes, closes failed handles, validates protocol/counts, and distinguishes no
+active interface from access/IO/version failures. There is no cached or machine-
+specific driver path, automatic installation or device-enable action.
+If no active interface exists, read-only PnP diagnostics report the device's
+started state/problem code, including disabled and signature/load failures,
+instead of always calling the driver uninstalled.
+See Microsoft's [device interface enumeration guidance](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/enumerating-installed-device-interface-classes).
+
+App and driver now accept positive dimensions up to the D3D11 texture API ceiling
+16384, replacing the arbitrary 640..7680 policy. A particular GPU/Windows display
+stack can impose stricter real resource limits. All presets at 1920x1080,
+1366x768 and 1280x720 pass managed validation; native tests cover 40 timing/EDID
+cases including 960x540 and tiny/large modes. Zero dimensions/rates, fixed protocol
+array bounds, integer/rational overflow and texture bounds remain checked. The
+23..1000Hz policy cap is removed. Protocol v2 requires the rebuilt driver, so a
+v1 driver cannot claim compatibility then reject FHD modes under the old floor.
+
+Matrix preparation queries remembered HWNDs directly rather than rescanning the
+desktop, and capture caches process metadata only within that one enumeration.
+Pre-transition user-minimized windows stay excluded; eligible windows minimized
+by Windows during topology changes can be restored. A single asynchronous
+WINDOWPLACEMENT request carries normal bounds and final maximized state.
+Window restore runs before keep/revert confirmation; decline, cancellation or
+failure compensates once, including the prior window plan. The compositor signals
+a PID-specific readiness event only after initialization; the app waits on that,
+process exit or cancellation, with the existing configurable safety deadline for
+failed initialization. Frame pacing also wakes on renderer stop, including very
+low refresh rates, without a forced shutdown delay.
+
+Managed regression checks (`--win10-fixes`, matrix/live-sync and existing safety
+suites), native ModeProbe and WDK compilation do not replace Windows 10 runtime
+testing. The subsequent isolated VM run below covers installation, loading and
+mode creation; physical GPU composition/window transitions remain a hardware test.
+
+### Windows 10 reflector installation defect (2026-10-20)
+
+The INF previously included `WUDFRD.inf`/`WUDFRD.NT*`. Microsoft documents that
+this inbox INF exists only on Windows 11, despite WUDFRd.sys and UMDF themselves
+being available on Windows 10. Consequently, a Windows 10 installation could
+fail before exposing any device interface; discovery fixes cannot repair this.
+The INF now registers the inbox WUDFRd service explicitly with AddService
+0x1fa, preserving existing service settings. This documented mechanism works on
+Windows 10 and Windows 11; the OS-owned WUDFRd.sys is never bundled or copied.
+Current InfVerif emits warning 2084 for this inbox binary lacking a package
+CopyFiles entry; adding a private OS binary copy to silence it would be wrong.
+Inf2Cat signability passes. The minimum INF build is corrected to 18362 because
+the binary requires IddCx 1.4 without a 1.3 runtime fallback. Supported/test
+target remains Windows 10 21H2 (19044), which supplies IddCx 1.5 and UMDF 2.31;
+the driver's requirements are IddCx 1.4 and UMDF 2.25.
+
+Reference: [Microsoft reflector installation guidance](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/adding-the-reflector).
+
+`powershell.exe -NoProfile -File tools\Test-DriverConnection.ps1 -OutputPath report.json`
+runs a standalone read-only probe on either OS, without the app/.NET runtime or
+administrator access. It records OS build, product hardware-ID matched PnP
+devices/problem codes, installed package identity, active device interfaces and
+raw GET_STATUS responses (including old protocol 1). Only GET_STATUS is sent;
+it never applies/clears a configuration or installs/enables/restarts a device.
+The current Windows 11 host reports PnP problem 0 and a successful protocol 1
+GET_STATUS response. The new app requires protocol 2, so the old installed
+driver must be updated separately. This host probe is not a Windows 10 test.
+A Windows 10 21H2 VM can check installation/load/discovery in isolation; actual
+physical-GPU split rendering and window transitions still need hardware review.
+
+### Windows 10 21H2 VM validation (2026-10-21)
+
+An offline Hyper-V generation 2 VM running Microsoft's Windows 10 Enterprise
+LTSC 2021 Evaluation (21H2/build 19044) completed **25 checks with zero failures**.
+Secure Boot stayed enabled; the VM had 4 GiB RAM, two capped virtual processors,
+no network adapter and no physical GPU assignment. The VM was shut down after
+testing. The host driver/version and display configuration were not changed.
+
+Verified in the guest:
+
+- Shipping installer wizard self-test, installation, repeat installation and
+  package verification, all exit 0.
+- Active interface discovery/open/GET_STATUS: protocol 2; adapter diagnostics
+  state 2 (ready), NTSTATUS 0.
+- Four 960x540 monitor arrivals at 60 Hz, followed by removal back to count 0.
+- Compositor binary loading (`--help`) and device helper status.
+- All 16 managed regression modes, plus native driver-status probing.
+- The actual self-contained shipping app opening and closing successfully with
+  `--manual-review` and the guest's documented close-to-tray setting disabled.
+
+The clean machine exposed two further compatibility defects:
+
+1. Opening certificate stores with OPEN_EXISTING failed on a not-yet-created
+   TrustedPublisher store. Addition now permits store creation; removal still
+   opens existing stores only. Publisher is added before Root. A trusted
+   self-signed development root also repairs missing publisher registration
+   after an earlier partial installation. Installation/reinstallation then
+   succeeded in the guest without changing its boot/signing policy.
+2. The default .NET 9+ CET-compatible host aborted before Main on this early
+   21H2 image: `Your Windows doesn't fully support CET` / 0x80131506. Managed
+   hosts now publish with CETCompat=false, following Microsoft's
+   [documented app-level option](https://learn.microsoft.com/en-us/dotnet/core/compatibility/interop/9.0/cet-support).
+   This trades away this application's CET opt-in to support the requested
+   baseline; it does not modify Windows-wide exploit protection. A published
+   PE-header regression guard checks the actual single-file host flag.
+
+The driver also exposes an optional read-only GET_DIAGNOSTICS extension (12
+bytes/version 1), retaining the v2 configuration/status ABI. It reports adapter
+initialization separately from device/interface availability. Completed adapter
+initialization failures reject positive configurations before persistence,
+instead of accepting a queue that can never drain; zero-monitor clearing still
+cancels pending work. The app surfaces the native failure status before applying.
+Older v2 drivers without the optional query remain compatible.
+
+Scripts and guard conditions live in `tools/win10-lab/`. Mutating guest tests
+require the expected VM computer name, Microsoft VM model, build 19044 and a
+per-lab marker. The ordinary `Test-DriverConnection.ps1` remains read-only.
+The test runner owns process handles to avoid PS 5.1 losing exit codes. Test
+deadlines are configurable harness limits, not product display timers.
+
+The official ISO SHA256 was
+`E4AB2E3535BE5748252A8D5D57539A6E59BE8D6726345EE10E7AFD2CB89FEFB5`.
+Local results: `artifacts/win10-21h2-validation/summary.json`,
+`fhd-roundtrip.json`, `driver-after-tests.json` and `vm-environment.json`.
+
+### Hardware review checklist
+
+1. Validate actual GPU capture/composition, physical monitor transitions and
+   remembered application windows on Windows 10/11 hardware. VM monitor arrival
+   tests and fake-window regressions do not establish physical rendering speed.
 2. Reconcile outdated driver-signing instructions in `ARCHITECTURE.md` and
    `install-driver.ps1` with the current signing/installer path.
 3. Validate rollback after driver/compositor failures and display topology changes.
 4. Expand adaptive layout and accessibility coverage once real cross-OS results
    establish a baseline.
+
+### v3 / nine-output follow-up (2026-10-21)
+
+A separate v3 package (INF 0.38.43.65) passed 27 guest steps on build 19044,
+including native 4 → 0 → 9 → 0 monitor counts; adapter diagnostics ended at
+Ready / STATUS_SUCCESS. See `artifacts/nine-version-fix-validation/` and
+`docs/FREE-LAYOUT.md` for the identical-DLL INF-version A/B evidence.
+This does not yet prove active OS geometry or nine-source visual composition.
+The final product-version package (0.5.6.0), upgrade binding fix, and actual
+3×3 composition harness await an isolated guest run. Existing user VMs are
+explicitly excluded. The new VM start was blocked by the host memory reserve;
+no running user VM was reconfigured or stopped to make room.

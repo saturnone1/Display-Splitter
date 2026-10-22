@@ -5,14 +5,17 @@ namespace DesktopSplitter.Services;
 
 public sealed record DesktopSnapshot(IReadOnlyList<MonitorInfo> Monitors, string DriverStatus, string CompositorStatus,
     int ActiveVirtualCount = 0, string ActiveGroupPath = "", LayoutKind ActiveGroupLayout = LayoutKind.TwoVertical,
-    IReadOnlyList<SplitTarget>? ActiveTargets = null, int SelectedSlot = 0, string RoutingIssue = "");
+    IReadOnlyList<SplitTarget>? ActiveTargets = null, int SelectedSlot = 0, string RoutingIssue = "",
+    IReadOnlyList<LayoutCut>? ActiveCustomCuts = null);
 
 /// <summary>Read-only native queries. Call off the UI thread; publish one consistent snapshot.</summary>
 public static class DesktopStatusReader
 {
-    public static DesktopSnapshot Read()
+    public static DesktopSnapshot Read(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var monitors = DisplayConfig.Enumerate();
+        ct.ThrowIfCancellationRequested();
         var settings = SettingsStore.Load();
         IReadOnlyList<SplitTarget> targets = Array.Empty<SplitTarget>();
         string routingIssue = "";
@@ -23,21 +26,22 @@ public static class DesktopStatusReader
             catch (Exception error) { routingIssue = "현재 배치 확인 실패: " + error.Message; }
         }
         int selectedSlot = settings is null ? 0 : SplitPrimarySelector.ReadChoice(settings, settings.PhysicalMonitorPath, settings.Layout, virtualCount);
-        return new(monitors.Where(monitor => !monitor.IsDeskSplitVirtual).ToArray(), ReadDriverStatus(), ReadCompositorStatus(), virtualCount,
-            settings?.PhysicalMonitorPath ?? "", settings?.Layout ?? LayoutKind.TwoVertical, targets, selectedSlot, routingIssue);
+        return new(monitors.Where(monitor => !monitor.IsDeskSplitVirtual).ToArray(), ReadDriverStatus(ct), ReadCompositorStatus(), virtualCount,
+            settings?.PhysicalMonitorPath ?? "", settings?.Layout ?? LayoutKind.TwoVertical, targets, selectedSlot, routingIssue, settings?.CustomLayoutCuts);
     }
 
-    public static string ReadDriverStatus()
+    public static string ReadDriverStatus(CancellationToken ct = default)
     {
         try
         {
-            if (!DriverClient.TryFindDevicePath(out string path))
-                return "드라이버 미설치 · 레이아웃 편집은 가능하며, 실제 분할에는 드라이버를 별도로 설치해야 합니다.";
-            try {
-                var status = DriverClient.GetStatus();
-                return $"드라이버 연결됨 · 통신 v{status.Version} · 가상 모니터 {status.ActiveMonitorCount}개";
-            } catch (DriverIoException) { return $"드라이버 장치는 있지만 상태를 읽지 못했습니다. 장치: {path}"; }
+            using var connection = DriverClient.Connect(ct);
+            var diagnostic = DriverClient.ReadDiagnostics(connection.Handle);
+            if (DriverClient.AdapterFailureMessage(diagnostic) is { } failure) return failure;
+            if (diagnostic is { AdapterState: 0 or 1 }) return "드라이버 연결됨 · 가상 디스플레이 어댑터 초기화 중";
+            return $"드라이버 연결됨 · 통신 v{connection.Status.Version} · 가상 모니터 {connection.Status.ActiveMonitorCount}개";
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (DriverNotFoundException error) { return error.Message; }
         catch (Exception error) { return "드라이버 확인 실패: " + error.Message; }
     }
 

@@ -19,6 +19,11 @@
           Condition="'$(MSBuildProjectExtension)' == '.csproj' And Exists('$(MSBuildThisFileDirectory)build\generated\Version.props')" />
 
   <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
+    <!-- .NET 9+ enables CET in apphost/singlefilehost by default. Early Win10
+         21H2 (19044.1288) exposes incomplete CET and aborts before Main. Keep
+         the app compatible without changing machine-wide exploit protection.
+         https://learn.microsoft.com/dotnet/core/compatibility/interop/9.0/cet-support -->
+    <CETCompat>false</CETCompat>
     <!-- Fallback when build.ps1 has not generated Version.props yet. -->
     <DeskSplitVersion Condition="'$(DeskSplitVersion)' == ''">0.0.0</DeskSplitVersion>
 

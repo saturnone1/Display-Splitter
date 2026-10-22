@@ -10,6 +10,11 @@ public sealed record MatrixDestination(string PhysicalMonitorPath, LayoutKind La
 public interface IMatrixWindows
 {
     IReadOnlyList<MatrixCandidate> ReadFrontToBack();
+    IReadOnlyList<MatrixCandidate> ReadRemembered(IReadOnlyList<MatrixWindowIdentity> identities)
+    {
+        var handles = identities.Select(identity => identity.Handle).ToHashSet();
+        return ReadFrontToBack().Where(candidate => handles.Contains(candidate.Identity.Handle)).ToArray();
+    }
     MatrixWindowIdentity? Remember(MatrixCandidate window, string markerName);
     bool IsCurrent(MatrixWindowIdentity window);
     bool Place(MatrixWindow window, SplitTarget target);
@@ -20,20 +25,21 @@ public interface IMatrixWindows
 /// <summary>Pure orchestration; injected window operations keep all regression tests off the desktop.</summary>
 public sealed class MatrixWorkspace(IMatrixWindows windows)
 {
-    public static string MarkerNameFor(string physicalPath, LayoutKind layout)
-        => "DesktopSplitter.Matrix." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(physicalPath.ToUpperInvariant() + ":" + layout)))[..24];
+    public static string MarkerNameFor(string physicalPath, LayoutKind layout, int slotCount = 0)
+        => "DesktopSplitter.Matrix." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(physicalPath.ToUpperInvariant() + ":" + layout
+            + (layout == LayoutKind.Custom ? ":" + slotCount : ""))))[..24];
     public static bool Matches(MatrixSnapshot memory, string physicalPath, LayoutKind layout, int count)
         => !string.IsNullOrWhiteSpace(physicalPath) && string.Equals(memory.PhysicalMonitorPath, physicalPath, StringComparison.OrdinalIgnoreCase)
             && memory.Layout == layout && memory.SlotCount == count;
 
     public static bool IsValid(MatrixSnapshot memory)
         => !string.IsNullOrWhiteSpace(memory.PhysicalMonitorPath) && Enum.IsDefined(memory.Layout)
-            && memory.SlotCount is >= 1 and <= 4 && memory.SlotCount == LayoutDefinition.FromKind(memory.Layout).SegmentCount
+            && LayoutDefinition.HasSegmentCount(memory.Layout, memory.SlotCount)
             && memory.PrimarySlot >= 1 && memory.PrimarySlot <= memory.SlotCount
             && memory.Windows is not null && memory.Windows.Count <= memory.SlotCount
             && memory.Windows.All(window => window is not null && window.Slot >= 1 && window.Slot <= memory.SlotCount
                 && window.Identity is { Handle: > 0, ProcessId: > 0, ProcessStartedUtcTicks: > 0, MarkerValue: > 0 }
-                && window.Identity.MarkerName == MarkerNameFor(memory.PhysicalMonitorPath, memory.Layout)
+                && window.Identity.MarkerName == MarkerNameFor(memory.PhysicalMonitorPath, memory.Layout, memory.SlotCount)
                 && window.NormalBounds.Width > 0 && window.NormalBounds.Height > 0
                 && window.SourceBounds.Width > 0 && window.SourceBounds.Height > 0 && window.SourceWork.Width > 0 && window.SourceWork.Height > 0)
             && memory.Windows.Select(window => window.Slot).Distinct().Count() == memory.Windows.Count
@@ -41,14 +47,14 @@ public sealed class MatrixWorkspace(IMatrixWindows windows)
 
     public MatrixSnapshot Capture(string physicalPath, LayoutKind layout, int primary, IReadOnlyList<SplitTarget> targets)
     {
-        if (string.IsNullOrWhiteSpace(physicalPath) || targets.Count is < 1 or > 4 || primary < 1 || primary > targets.Count
-            || !Enum.IsDefined(layout) || targets.Count != LayoutDefinition.FromKind(layout).SegmentCount
+        if (string.IsNullOrWhiteSpace(physicalPath) || targets.Count is < 1 or > 9 || primary < 1 || primary > targets.Count
+            || !LayoutDefinition.HasSegmentCount(layout, targets.Count)
             || !targets.Select(target => target.Number).Order().SequenceEqual(Enumerable.Range(1, targets.Count))
             || targets.Any(target => string.IsNullOrWhiteSpace(target.DeviceName) || target.Bounds.Width <= 0 || target.Bounds.Height <= 0
                 || target.Work.Width <= 0 || target.Work.Height <= 0)
             || targets.Select(target => SplitWindowMover.NormalizeDevice(target.DeviceName)).Distinct().Count() != targets.Count)
             throw new InvalidOperationException("매트릭스를 기억할 모니터 또는 분할 칸 정보가 올바르지 않습니다.");
-        string marker = MarkerNameFor(physicalPath, layout);
+        string marker = MarkerNameFor(physicalPath, layout, targets.Count);
         var candidates = windows.ReadFrontToBack();
         var memory = new MatrixSnapshot { PhysicalMonitorPath = physicalPath, Layout = layout, SlotCount = targets.Count, PrimarySlot = primary };
         foreach (var target in targets.OrderBy(target => target.Number)) {
@@ -65,7 +71,7 @@ public sealed class MatrixWorkspace(IMatrixWindows windows)
     {
         if (!IsValid(memory)) throw new InvalidOperationException("기억한 매트릭스 정보가 올바르지 않습니다.");
         var allowed = allowedDevices.Select(SplitWindowMover.NormalizeDevice).ToHashSet();
-        var candidates = windows.ReadFrontToBack();
+        var candidates = windows.ReadRemembered(memory.Windows.Select(window => window.Identity).ToArray());
         var eligible = memory.Windows.Where(window => windows.IsCurrent(window.Identity)
             && candidates.Any(candidate => candidate.Identity.Handle == window.Identity.Handle && allowed.Contains(SplitWindowMover.NormalizeDevice(candidate.DeviceName))))
             .Select(window => window.Identity).ToHashSet();

@@ -19,7 +19,7 @@ public static class SplitPrimarySelector
         if (string.IsNullOrWhiteSpace(expectedPhysicalPath)
             || !string.Equals(settings.PhysicalMonitorPath, expectedPhysicalPath, StringComparison.OrdinalIgnoreCase) || settings.Layout != expectedLayout)
             throw new InvalidOperationException("현재 선택한 모니터·분할 방식과 실행 중인 분할 그룹이 다릅니다. 다른 그룹의 선택 칸은 변경하지 않았습니다.");
-        if (!Enum.IsDefined(expectedLayout) || count != LayoutDefinition.FromKind(expectedLayout).SegmentCount || slot < 1 || slot > count)
+        if (!LayoutDefinition.HasSegmentCount(expectedLayout, count) || slot < 1 || slot > count)
             throw new InvalidOperationException("현재 그룹에 없는 분할 칸입니다.");
         settings.PrimarySegmentSlot = slot;
         settings.MatrixPrimarySlots[ProfileKey(expectedPhysicalPath, expectedLayout)] = slot;

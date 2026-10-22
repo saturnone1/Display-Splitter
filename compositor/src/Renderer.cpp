@@ -7,6 +7,7 @@
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 using Microsoft::WRL::ComPtr;
@@ -69,10 +70,20 @@ bool PickAdapter(IDXGIFactory5* factory, const std::wstring& deviceName,
                  ComPtr<IDXGIAdapter1>& outAdapter) {
     for (UINT ai = 0;; ++ai) {
         ComPtr<IDXGIAdapter1> a;
-        if (factory->EnumAdapters1(ai, &a) == DXGI_ERROR_NOT_FOUND) break;
+        const HRESULT adapterResult = factory->EnumAdapters1(ai, &a);
+        if (adapterResult == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(adapterResult) || !a) {
+            DS_WARN(L"EnumAdapters1 failed: %s", HrString(adapterResult));
+            return false;
+        }
         for (UINT oi = 0;; ++oi) {
             ComPtr<IDXGIOutput> o;
-            if (a->EnumOutputs(oi, &o) == DXGI_ERROR_NOT_FOUND) break;
+            const HRESULT outputResult = a->EnumOutputs(oi, &o);
+            if (outputResult == DXGI_ERROR_NOT_FOUND) break;
+            if (FAILED(outputResult) || !o) {
+                DS_WARN(L"EnumOutputs failed: %s", HrString(outputResult));
+                return false;
+            }
             DXGI_OUTPUT_DESC od = {};
             if (FAILED(o->GetDesc(&od))) continue;
             if (::_wcsicmp(od.DeviceName, deviceName.c_str()) == 0) {
@@ -84,7 +95,7 @@ bool PickAdapter(IDXGIFactory5* factory, const std::wstring& deviceName,
     DS_WARN(L"physical device '%s' not matched to an adapter; using adapter 0",
             deviceName.c_str());
     ComPtr<IDXGIAdapter1> a0;
-    if (factory->EnumAdapters1(0, &a0) == DXGI_ERROR_NOT_FOUND) return false;
+    if (FAILED(factory->EnumAdapters1(0, &a0)) || !a0) return false;
     outAdapter = a0;
     return true;
 }
@@ -98,8 +109,8 @@ Renderer::~Renderer() {
 
 bool Renderer::InitDevice(const AppConfig& cfg,
                           std::vector<SegmentShared>* segments) {
-    if (cfg.segments.empty() || cfg.segments.size() > 4) {
-        DS_ERR(L"live routing requires between one and four segments");
+    if (cfg.segments.empty() || cfg.segments.size() > DESKSPLIT_MAX_MONITORS) {
+        DS_ERR(L"live routing requires between one and nine segments");
         return false;
     }
     m_cfg = cfg;
@@ -114,6 +125,8 @@ bool Renderer::InitDevice(const AppConfig& cfg,
     if (!m_paceTimer) {
         m_paceTimer = ::CreateWaitableTimerW(nullptr, FALSE, nullptr);
     }
+    m_paceStop = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!m_paceStop) return false;
 
     return CreateDevice();
 }
@@ -405,7 +418,9 @@ void Renderer::RenderFrame() {
         uint64_t cursorVersion = 0;
         std::vector<uint8_t> cursorPixels;   // only filled when the shape changed
     };
-    std::vector<Snapshot> snaps(segCount);
+    // InitDevice validates the routing limit. Keep the per-frame snapshots on
+    // the stack instead of allocating a vector on every presented frame.
+    std::array<Snapshot, DESKSPLIT_MAX_MONITORS> snaps{};
 
     for (size_t i = 0; i < segCount; ++i) {
         SegmentShared& s = (*m_segments)[i];
@@ -493,10 +508,10 @@ void Renderer::RenderFrame() {
         ID3D11SamplerState* samplers[] = { m_sampler.Get() };
         m_gpu.ctx->PSSetSamplers(0, 1, samplers);
 
-        const uint32_t routing = m_routing.load(std::memory_order_acquire);
+        const uint64_t routing = m_routing.load(std::memory_order_acquire);
         for (size_t i = 0; i < segCount; ++i) {
             const SegmentConfig& sc = m_cfg.segments[i];
-            const size_t source = (routing >> (i * 2)) & 3;
+            const size_t source = (routing >> (i * 4)) & 15;
             const Snapshot& snap = snaps[source];
             if (!snap.hasFrame || !snap.srv || snap.frameW == 0 || snap.frameH == 0)
                 continue;
@@ -613,12 +628,12 @@ void Renderer::PaceFrame() {
         LARGE_INTEGER due;
         due.QuadPart = -wait100ns;
         if (::SetWaitableTimer(m_paceTimer, &due, 0, nullptr, nullptr, FALSE)) {
-            ::WaitForSingleObject(m_paceTimer, static_cast<DWORD>(
-                                                   (wait100ns / 10000) + 2));
+            HANDLE waits[] = {m_paceStop, m_paceTimer};
+            ::WaitForMultipleObjects(2, waits, FALSE, INFINITE);
             return;
         }
     }
-    ::Sleep(static_cast<DWORD>(wait100ns / 10000));
+    ::WaitForSingleObject(m_paceStop, static_cast<DWORD>(wait100ns / 10000));
 }
 
 void Renderer::ThreadMain() {
@@ -709,6 +724,8 @@ void Renderer::ThreadMain() {
 }
 
 bool Renderer::StartThread() {
+    if (!m_paceStop) return false;
+    ::ResetEvent(m_paceStop);
     m_stop.store(false, std::memory_order_release);
     m_thread = std::thread([this] { ThreadMain(); });
     return true;
@@ -716,6 +733,7 @@ bool Renderer::StartThread() {
 
 void Renderer::StopThread() {
     m_stop.store(true, std::memory_order_release);
+    if (m_paceStop) ::SetEvent(m_paceStop);
     if (m_thread.joinable()) m_thread.join();
 }
 
@@ -749,6 +767,10 @@ void Renderer::Shutdown() {
     if (m_paceTimer) {
         ::CloseHandle(m_paceTimer);
         m_paceTimer = nullptr;
+    }
+    if (m_paceStop) {
+        ::CloseHandle(m_paceStop);
+        m_paceStop = nullptr;
     }
 }
 

@@ -1,5 +1,7 @@
 # DesktopSplitter
 
+> Development branch: the editor, driver protocol and compositor now support up to nine regions, including a 3×3 preset and custom rectangular cuts. Windows 10 21H2 VM driver creation/clearing of nine monitors has passed after correcting driver version metadata. Full active-desktop/compositor validation and the final installer upgrade test remain pending; this is not yet a validated release. See [free-layout implementation and validation status](docs/FREE-LAYOUT.md). The description below covers the existing release.
+
 Split a single physical monitor into **2, 3, or 4 real virtual monitors** on
 Windows. Unlike window managers (FancyZones etc.), the segments are genuine
 monitors as far as Windows and every application is concerned — each has its
@@ -70,11 +72,10 @@ default to it.
 - **Exact segment identity**: virtual monitors are matched to segments by a
   serial number embedded in each virtual monitor's EDID — never by guesswork
   — so segments cannot swap.
-- **Cursor behavior**: only the covered physical monitor's area is off
-  limits (it feels like a normal screen edge); all other monitors, real or
-  virtual, are unrestricted.
-- **Window rescuer**: any app window that opens into the covered area is
-  automatically moved into segment 1. (`--no-rescue` / `--no-confine` flags
+- **Cursor behavior**: visible split edges map to adjacent physical monitors,
+  following the current slot order without a global rectangular cursor clip.
+- **Window rescuer**: app windows hidden behind the covered area, including
+  reactivated existing windows, are placed across the whole split group. (`--no-rescue` / `--no-confine` flags
   on the compositor disable these.)
 - **Multi-monitor friendly**: additional real monitors keep working
   normally alongside the split.
